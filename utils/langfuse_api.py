@@ -1,7 +1,11 @@
 """Langfuse API utilities for fetching and managing traces/sessions."""
 
 import base64
+import hashlib
+import json
+import os
 import time as time_mod
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -19,6 +23,36 @@ def get_langfuse_headers(public_key: str, secret_key: str) -> dict[str, str]:
     return {"Authorization": f"Basic {auth}"}
 
 
+def _default_cache_dir() -> Path:
+    return Path(__file__).resolve().parent / "__pycache__" / "langfuse_cache"
+
+
+def _cache_path(prefix: str, payload: dict[str, Any], cache_dir: Path) -> Path:
+    raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    key = hashlib.sha256(raw).hexdigest()
+    return cache_dir / f"{prefix}_{key}.json"
+
+
+def _try_load_cache(path: Path) -> Any | None:
+    try:
+        if not path.exists():
+            return None
+        txt = path.read_text(encoding="utf-8")
+        return json.loads(txt)
+    except Exception:
+        return None
+
+
+def _try_write_cache(path: Path, data: Any) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        return
+
+
 def fetch_traces_window(
     *,
     base_url: str,
@@ -32,11 +66,33 @@ def fetch_traces_window(
     retry: int,
     backoff: float,
     debug_out: dict[str, Any] | None = None,
+    use_disk_cache: bool = True,
+    cache_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch traces from Langfuse within a time window with pagination."""
     url = f"{base_url.rstrip('/')}/api/public/traces"
     rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+
+    cache_root = Path(cache_dir) if isinstance(cache_dir, str) and cache_dir.strip() else _default_cache_dir()
+    cache_payload = {
+        "kind": "fetch_traces_window",
+        "base_url": base_url,
+        "from_iso": from_iso,
+        "to_iso": to_iso,
+        "envs": envs or [],
+        "page_size": int(page_size),
+        "page_limit": int(page_limit),
+        "max_traces": int(max_traces),
+    }
+    cache_path = _cache_path("traces", cache_payload, cache_root)
+    if use_disk_cache:
+        cached = _try_load_cache(cache_path)
+        if isinstance(cached, list) and all(isinstance(x, dict) for x in cached):
+            if isinstance(debug_out, dict):
+                debug_out.clear()
+                debug_out.update({"cache_hit": True, "cache_path": str(cache_path)})
+            return list(cached)
 
     session = requests.Session()
     page = 1
@@ -182,7 +238,179 @@ def fetch_traces_window(
         page += 1
         time_mod.sleep(0.05)
 
+    if use_disk_cache:
+        _try_write_cache(cache_path, rows)
+        if isinstance(debug_out, dict):
+            debug_out["cache_hit"] = False
+            debug_out["cache_path"] = str(cache_path)
+
     return rows
+
+
+def fetch_user_first_seen(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    from_iso: str,
+    envs: list[str] | None,
+    page_size: int,
+    page_limit: int,
+    retry: int,
+    backoff: float,
+    debug_out: dict[str, Any] | None = None,
+    use_disk_cache: bool = True,
+    cache_dir: str | None = None,
+) -> dict[str, str]:
+    """Fetch per-user first-seen timestamps by paging traces oldest -> newest.
+
+    Uses the public traces endpoint with `fields=core` to keep payload small.
+    Returns a mapping of userId -> first timestamp (ISO string) seen in the scan.
+    """
+
+    url = f"{base_url.rstrip('/')}/api/public/traces"
+    session = requests.Session()
+
+    cache_root = Path(cache_dir) if isinstance(cache_dir, str) and cache_dir.strip() else _default_cache_dir()
+    cache_payload = {
+        "kind": "fetch_user_first_seen",
+        "base_url": base_url,
+        "from_iso": from_iso,
+        "envs": envs or [],
+        "page_size": int(page_size),
+        "page_limit": int(page_limit),
+        "exclude_machine_users": True,
+    }
+    cache_path = _cache_path("user_first_seen", cache_payload, cache_root)
+    if use_disk_cache:
+        cached = _try_load_cache(cache_path)
+        if isinstance(cached, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in cached.items()):
+            if isinstance(debug_out, dict):
+                debug_out.clear()
+                debug_out.update({"cache_hit": True, "cache_path": str(cache_path)})
+            return dict(cached)
+
+    requested_limit = int(page_size)
+    if requested_limit <= 0:
+        requested_limit = 100
+    limit = min(100, requested_limit)
+
+    if isinstance(debug_out, dict):
+        debug_out.clear()
+        debug_out.update(
+            {
+                "url": url,
+                "from_iso": from_iso,
+                "envs": envs,
+                "page_limit": int(page_limit),
+                "requested_page_size": int(requested_limit),
+                "page_size": int(limit),
+                "pages": [],
+                "stopped_early_reason": None,
+            }
+        )
+
+    first_seen: dict[str, str] = {}
+    stopped_early = False
+    page = 1
+    while page <= page_limit:
+        params: dict[str, Any] = {
+            "fromTimestamp": from_iso,
+            "limit": limit,
+            "page": page,
+            "orderBy": "timestamp.asc",
+            "fields": "core",
+        }
+        if envs:
+            params["environment"] = envs
+
+        attempts = 0
+        last_error: str | None = None
+        while True:
+            t0 = time_mod.time()
+            r = session.get(url, headers=headers, params=params, timeout=30)
+            elapsed_s = time_mod.time() - t0
+            if r.status_code < 400:
+                last_error = None
+                break
+
+            text_preview = ""
+            try:
+                text_preview = str(getattr(r, "text", "") or "")
+            except Exception:
+                text_preview = ""
+
+            if 500 <= r.status_code < 600 and attempts < retry:
+                attempts += 1
+                last_error = (
+                    f"Langfuse 5xx on page {page} (status {r.status_code}), retry {attempts}/{retry}"
+                )
+                time_mod.sleep(backoff * attempts)
+                continue
+
+            last_error = f"Langfuse error on page {page} (status {r.status_code}): {text_preview[:500]}"
+            break
+
+        if last_error:
+            if isinstance(debug_out, dict):
+                debug_out["stopped_early_reason"] = last_error
+            stopped_early = True
+            if HAS_STREAMLIT:
+                try:
+                    st.warning(f"Stopping user scan early: {last_error}")
+                except Exception:
+                    pass
+            break
+
+        data: Any
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+        batch = data.get("data") if isinstance(data, dict) else data
+        if not batch:
+            break
+
+        if isinstance(debug_out, dict):
+            page_entry: dict[str, Any] = {
+                "page": page,
+                "params": dict(params),
+                "status_code": int(getattr(r, "status_code", 0) or 0),
+                "elapsed_s": float(elapsed_s),
+                "items_returned": len(batch) if isinstance(batch, list) else None,
+            }
+            debug_out["pages"].append(page_entry)
+
+        for it in batch:
+            if not isinstance(it, dict):
+                continue
+            user_id = it.get("userId")
+            ts = it.get("timestamp")
+            if not isinstance(user_id, str) or not user_id.strip():
+                continue
+            if "machine" in user_id.lower():
+                continue
+            if not isinstance(ts, str) or not ts.strip():
+                continue
+            if user_id not in first_seen:
+                first_seen[user_id] = ts
+
+        if isinstance(batch, list) and len(batch) < limit:
+            break
+
+        page += 1
+        time_mod.sleep(0.05)
+
+    if isinstance(debug_out, dict):
+        debug_out["users_found"] = int(len(first_seen))
+        debug_out["pages_scanned"] = int(page - 1) if page > 1 else 0
+
+    if use_disk_cache and not stopped_early:
+        _try_write_cache(cache_path, first_seen)
+        if isinstance(debug_out, dict):
+            debug_out["cache_hit"] = False
+            debug_out["cache_path"] = str(cache_path)
+
+    return first_seen
 
 
 def extract_datasets_from_session(langfuse: Any, session_id: str) -> str:

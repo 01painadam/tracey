@@ -1,8 +1,6 @@
 """Trace Analytics Reports tab."""
-
-import hashlib
 import json
-import time as time_mod
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,25 +8,20 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from utils.prompt_fixtures import (
-    DEFAULT_ENRICH_BATCH_PROMPT_TEMPLATE,
-    DEFAULT_ENRICH_PROMPT,
-)
 from utils import (
+    get_langfuse_headers,
     normalize_trace_format,
     parse_trace_dt,
     first_human_prompt,
     final_ai_message,
     classify_outcome,
+    fetch_user_first_seen,
     extract_trace_context,
     extract_tool_calls_and_results,
     extract_tool_flow,
     extract_usage_metadata,
     trace_has_internal_error,
     as_float,
-    safe_json_loads,
-    strip_code_fences,
-    get_gemini_model_options,
     csv_bytes_any,
     daily_volume_chart,
     daily_outcome_chart,
@@ -39,11 +32,10 @@ from utils import (
     latency_histogram,
     cost_histogram,
     category_pie_chart,
-    success_rate_bar_chart,
     tool_success_rate_chart,
     tool_calls_vs_latency_chart,
-    reasoning_tokens_histogram,
     tool_flow_sankey_data,
+    reasoning_tokens_histogram,
 )
 
 
@@ -78,14 +70,16 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     if "stats_traces" not in st.session_state:
         st.session_state.stats_traces = []
 
-    if "stats_enrich_cache" not in st.session_state:
-        st.session_state.stats_enrich_cache = {}
+    if "analytics_user_first_seen" not in st.session_state:
+        st.session_state.analytics_user_first_seen = None
+    if "analytics_user_first_seen_debug" not in st.session_state:
+        st.session_state.analytics_user_first_seen_debug = {}
 
     traces: list[dict[str, Any]] = st.session_state.stats_traces
     if not traces:
         st.info(
             "This tab gives you a high-level view of the currently loaded trace dataset: volumes, outcomes, latency, cost, "
-            "and optional Gemini enrichment.\n\n"
+            "and usage patterns.\n\n"
             "1. Use the sidebar **🚀 Fetch traces** button to load a dataset once.\n"
             "2. Switch between tabs to explore different views of the **same** traces without re-fetching."
         )
@@ -169,241 +163,82 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     except Exception:
         pass
 
-    enrich_model = "gemini-2.5-flash-lite"
-    enrich_prompt = DEFAULT_ENRICH_PROMPT
-    is_default_enrich_prompt = True
-
-    def _enrich_cache_key(prompt_text: str) -> str:
-        sig = f"{enrich_model}|{enrich_prompt}|{prompt_text}".encode("utf-8")
-        return hashlib.sha256(sig).hexdigest()
-
-    st.markdown("---")
-    st.markdown("### 🔍 Gemini Enrichment")
-    enrich_max_labels = 100
-    batch_size = 100
-    if not gemini_api_key:
-        st.warning("Set GEMINI_API_KEY in the sidebar to run enrichment.")
+    total_traces = int(len(df))
+    if "user_id" in df.columns:
+        _users_series = df["user_id"].dropna().astype(str).map(lambda x: x.strip())
+        _users_series = _users_series.loc[lambda s: s.ne("")]
+        _users_series = _users_series.loc[~_users_series.str.contains("machine", case=False, na=False)]
+        unique_users = int(_users_series.nunique())
     else:
-        c_clear, c_run = st.columns([1, 3])
-        with c_clear:
-            if st.button("Clear enrichment cache", key="stats_enrich_clear"):
-                st.session_state.stats_enrich_cache = {}
-                st.success("Cleared enrichment cache")
+        unique_users = 0
+    unique_threads = int(df["session_id"].dropna().nunique()) if "session_id" in df.columns else 0
 
-        with st.expander("Enrichment settings", expanded=False):
-            enrich_model_options = get_gemini_model_options(gemini_api_key)
-            default_model = "gemini-2.5-flash-lite"
-            if default_model not in enrich_model_options and len(enrich_model_options):
-                default_model = enrich_model_options[0]
-            default_idx = (
-                enrich_model_options.index(default_model)
-                if default_model in enrich_model_options
-                else 0
-            )
-            enrich_model = st.selectbox(
-                "Gemini model",
-                options=enrich_model_options,
-                index=default_idx,
-                key="analytics_enrich_model",
-            )
-            enrich_prompt = st.text_area("Enrichment prompt", value=DEFAULT_ENRICH_PROMPT, height=120)
-            is_default_enrich_prompt = enrich_prompt.strip() == DEFAULT_ENRICH_PROMPT.strip()
-            enrich_max_labels = st.number_input("Max prompts to label", min_value=1, max_value=5000, value=100)
-            batch_size = st.number_input("Batch size (prompts per API call)", min_value=1, max_value=200, value=100)
-        with c_run:
-            run_clicked = st.button("🚀 Run enrichment", key="stats_enrich", type="primary")
+    user_first_seen_df: pd.DataFrame | None = None
+    user_first_seen_total_users = 0
+    user_first_seen_new_users = 0
+    user_first_seen_returning_users = 0
+    user_first_seen_unknown_users = 0
+    user_first_seen_filled_from_window = 0
 
-        if run_clicked:
-            import google.generativeai as genai
+    if isinstance(st.session_state.get("analytics_user_first_seen"), pd.DataFrame):
+        user_first_seen_df = st.session_state.get("analytics_user_first_seen")
 
-            genai.configure(api_key=gemini_api_key)
-            model = genai.GenerativeModel(enrich_model)
+    if user_first_seen_df is not None and len(user_first_seen_df):
+        user_first_seen_total_users = int(len(user_first_seen_df))
 
-            prompts = (
-                df[["trace_id", "prompt"]]
-                .dropna(subset=["prompt"])
-                .astype({"prompt": "string"})
-                .to_dict("records")
-            )
-            prompts = [p for p in prompts if str(p.get("prompt") or "").strip()]
+        if "user_id" in df.columns and df["user_id"].notna().any():
+            active_users_series = df["user_id"].dropna().astype(str).map(lambda x: x.strip())
+            active_users_series = active_users_series.loc[lambda s: s.ne("")]
+            active_users_series = active_users_series.loc[
+                ~active_users_series.str.contains("machine", case=False, na=False)
+            ]
+            active_users_set = set(active_users_series.unique())
 
-            missing: list[dict[str, Any]] = []
-            for p in prompts:
-                key = _enrich_cache_key(str(p.get("prompt") or ""))
-                cached = st.session_state.stats_enrich_cache.get(key)
-                has_error = isinstance(cached, dict) and bool(cached.get("error"))
-                if key not in st.session_state.stats_enrich_cache or has_error:
-                    missing.append({"key": key, **p})
+            base_first_seen = user_first_seen_df.copy()
+            base_first_seen = base_first_seen.dropna(subset=["user_id", "first_seen"])
+            base_first_seen["user_id"] = base_first_seen["user_id"].astype(str).map(lambda x: x.strip())
+            base_first_seen = base_first_seen[base_first_seen["user_id"].ne("")]
+            base_first_seen = base_first_seen[
+                ~base_first_seen["user_id"].astype(str).str.contains("machine", case=False, na=False)
+            ]
+            base_first_seen = base_first_seen[base_first_seen["user_id"].isin(active_users_set)]
 
-            missing = missing[: int(enrich_max_labels)]
-            if not missing:
-                st.info("No new prompts to label (everything already cached).")
-            else:
-                prog = st.progress(0)
-                status = st.empty()
+            fs_dt = pd.to_datetime(base_first_seen["first_seen"], errors="coerce", utc=True)
+            base_first_seen = base_first_seen.assign(first_seen_date=fs_dt.dt.date)
+            base_first_seen = base_first_seen.dropna(subset=["first_seen_date"])
 
-                batch_prompt_template = DEFAULT_ENRICH_BATCH_PROMPT_TEMPLATE
-
-                def process_batch(batch_items: list[dict]) -> None:
-                    batch_prompts = [str(item.get("prompt") or "") for item in batch_items]
-                    prompts_json = json.dumps([{"id": i, "prompt": p} for i, p in enumerate(batch_prompts)], ensure_ascii=False)
-                    batch_prompt_text = batch_prompt_template.format(prompts_json=prompts_json)
-
-                    try:
-                        resp = model.generate_content(batch_prompt_text)
-                        txt = str(getattr(resp, "text", "") or "")
-                        cleaned = strip_code_fences(txt)
-                        payload: Any
-                        try:
-                            payload = json.loads(cleaned)
-                        except Exception:
-                            # Fallback: try to parse the first JSON array/object substring found.
-                            payload = None
-                            try:
-                                if "[" in cleaned and "]" in cleaned:
-                                    start = cleaned.find("[")
-                                    end = cleaned.rfind("]")
-                                    payload = json.loads(cleaned[start : end + 1])
-                                elif "{" in cleaned and "}" in cleaned:
-                                    start = cleaned.find("{")
-                                    end = cleaned.rfind("}")
-                                    payload = json.loads(cleaned[start : end + 1])
-                            except Exception:
-                                payload = None
-
-                        if payload is None:
-                            # Last resort: keep prior behavior, which wraps non-dict JSON under {"raw": ...}
-                            payload = safe_json_loads(cleaned)
-
-                        def _extract_result_list(payload: Any) -> list[Any] | None:
-                            if isinstance(payload, list):
-                                return payload
-                            if isinstance(payload, dict):
-                                # Handle safe_json_loads wrapping and common API wrappers.
-                                if "raw" in payload:
-                                    raw_val = payload.get("raw")
-                                    # raw may itself be a list/dict/str
-                                    extracted = _extract_result_list(raw_val)
-                                    if extracted is not None:
-                                        return extracted
-                                    if isinstance(raw_val, str):
-                                        try:
-                                            return _extract_result_list(json.loads(strip_code_fences(raw_val)))
-                                        except Exception:
-                                            return None
-                                for k in ["results", "items", "data", "outputs", "responses"]:
-                                    v = payload.get(k)
-                                    if isinstance(v, list):
-                                        return v
-                                if all(isinstance(k, str) and k.isdigit() for k in payload.keys()):
-                                    as_pairs = [(int(k), v) for k, v in payload.items() if isinstance(k, str) and k.isdigit()]
-                                    as_pairs = [(i, v) for i, v in as_pairs if 0 <= i < len(batch_items)]
-                                    if as_pairs:
-                                        out = [None] * len(batch_items)
-                                        for i, v in as_pairs:
-                                            out[i] = v
-                                        return out
-                            return None
-
-                        def _map_results_to_items(result_list: list[Any]) -> list[Any]:
-                            mapped: list[Any | None] = [None] * len(batch_items)
-                            for idx, r in enumerate(result_list):
-                                if isinstance(r, dict) and isinstance(r.get("id"), int):
-                                    rid = int(r.get("id"))
-                                    if 0 <= rid < len(mapped):
-                                        mapped[rid] = r
-                                        continue
-                                if idx < len(mapped):
-                                    mapped[idx] = r
-
-                            return [m if m is not None else {"error": "Missing result"} for m in mapped]
-
-                        result_list = _extract_result_list(payload)
-                        if result_list is None:
-                            for item in batch_items:
-                                st.session_state.stats_enrich_cache[item["key"]] = {
-                                    "error": "Could not extract per-prompt results from response",
-                                    "raw": {
-                                        "response_preview": cleaned[:800],
-                                    },
-                                }
-                            return
-
-                        mapped_results = _map_results_to_items(result_list)
-                        for item, parsed in zip(batch_items, mapped_results):
-                            if isinstance(parsed, dict) and parsed.get("error"):
-                                st.session_state.stats_enrich_cache[item["key"]] = {
-                                    "error": str(parsed.get("error")),
-                                    "raw": parsed,
-                                }
-                                continue
-
-                            st.session_state.stats_enrich_cache[item["key"]] = {
-                                "datasets": parsed.get("datasets") if isinstance(parsed, dict) else None,
-                                "topics": parsed.get("topics") if isinstance(parsed, dict) else None,
-                                "query_flavour": parsed.get("query_flavour") if isinstance(parsed, dict) else None,
-                                "raw": parsed if isinstance(parsed, dict) else {},
-                            }
-                    except Exception as e:
-                        for item in batch_items:
-                            st.session_state.stats_enrich_cache[item["key"]] = {"error": str(e)}
-
-                batches = [missing[i:i + int(batch_size)] for i in range(0, len(missing), int(batch_size))]
-                for batch_idx, batch in enumerate(batches):
-                    status.text(f"Processing batch {batch_idx + 1}/{len(batches)} ({len(batch)} prompts)")
-                    process_batch(batch)
-                    prog.progress(min(1.0, (batch_idx + 1) / max(1, len(batches))))
-                    time_mod.sleep(0.1)
-
-                status.empty()
-                st.success(f"Enriched {len(missing)} prompts in {len(batches)} batches")
-
-    has_enrichment_cache = len(st.session_state.stats_enrich_cache) > 0
-    if has_enrichment_cache:
-        def _apply_enrichment(row: pd.Series) -> dict[str, Any]:
-            p = str(row.get("prompt") or "")
-            if not p.strip():
-                return {}
-            key = _enrich_cache_key(p)
-            val = st.session_state.stats_enrich_cache.get(key)
-            if not isinstance(val, dict):
-                return {}
-
-            if val.get("error"):
-                return {
-                    "enrich_error": str(val.get("error")),
-                }
-
-            def as_list(x: Any) -> list[str]:
-                if x is None:
-                    return []
-                if isinstance(x, list):
-                    return [str(i).strip() for i in x if str(i).strip()]
-                if isinstance(x, str):
-                    s = x.strip()
-                    if not s:
-                        return []
-                    return [s]
-                return [str(x)]
-
-            datasets = as_list(val.get("datasets"))
-            topics = as_list(val.get("topics"))
-            flavour = val.get("query_flavour")
-
-            return {
-                "enrich_datasets": ", ".join(datasets),
-                "enrich_topics": ", ".join(topics),
-                "enrich_query_flavour": str(flavour).strip() if isinstance(flavour, str) and str(flavour).strip() else "",
-                "enrich_raw": json.dumps(val.get("raw") or {}, ensure_ascii=False),
+            first_seen_by_user: dict[str, Any] = {
+                str(r["user_id"]): r["first_seen_date"] for r in base_first_seen.to_dict("records")
             }
 
-        enrich_cols = df.apply(_apply_enrichment, axis=1, result_type="expand")
-        if isinstance(enrich_cols, pd.DataFrame) and len(enrich_cols.columns):
-            df = pd.concat([df, enrich_cols], axis=1)
+            missing_users = active_users_set - set(first_seen_by_user.keys())
+            user_first_seen_unknown_users = int(len(missing_users))
 
-    total_traces = int(len(df))
-    unique_users = int(df["user_id"].dropna().nunique()) if "user_id" in df.columns else 0
-    unique_threads = int(df["session_id"].dropna().nunique()) if "session_id" in df.columns else 0
+            if missing_users and "date" in df.columns and df["date"].notna().any():
+                base_user_dates = df.dropna(subset=["user_id", "date"]).copy()
+                base_user_dates["user_id"] = base_user_dates["user_id"].astype(str).map(lambda x: x.strip())
+                base_user_dates = base_user_dates[base_user_dates["user_id"].ne("")]
+                base_user_dates = base_user_dates[
+                    ~base_user_dates["user_id"].astype(str).str.contains("machine", case=False, na=False)
+                ]
+                base_user_dates["date"] = pd.to_datetime(base_user_dates["date"], utc=True, errors="coerce").dt.date
+                base_user_dates = base_user_dates.dropna(subset=["date"])
+                window_first_seen = (
+                    base_user_dates.groupby("user_id", dropna=True)["date"].min().to_dict()
+                )
+
+                filled = 0
+                for u in missing_users:
+                    d = window_first_seen.get(u)
+                    if d is not None:
+                        first_seen_by_user[u] = d
+                        filled += 1
+                user_first_seen_filled_from_window = int(filled)
+
+            fs_dates_all = pd.Series(list(first_seen_by_user.values()))
+            in_range = (fs_dates_all >= start_date) & (fs_dates_all <= end_date)
+            user_first_seen_new_users = int(in_range.sum())
+            user_first_seen_returning_users = int((fs_dates_all < start_date).sum())
 
     util_user_days = 0
     util_mean_prompts = 0.0
@@ -444,6 +279,103 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     p95_latency = float(lat_s.quantile(0.95)) if len(lat_s) else 0.0
 
     st.markdown(f"### Summary Statistics ({(end_date - start_date).days + 1} days: {start_date} to {end_date})")
+
+    st.caption(
+        "To enable true New vs Returning user metrics, fetch the all-time user first-seen table (scans traces oldest → newest starting 2025-09-17). "
+        "Uses the sidebar 'Max pages' + 'Traces per page' limits."
+    )
+    cached_df = st.session_state.get("analytics_user_first_seen")
+    btn_c1, btn_c2 = st.columns([1, 1])
+    with btn_c1:
+        if st.button("👥 Fetch all time user data", type="secondary"):
+            debug_out: dict[str, Any] = {}
+            try:
+                headers = get_langfuse_headers(public_key, secret_key)
+                from_iso = datetime(2025, 9, 17, tzinfo=timezone.utc).isoformat()
+                page_size = int(st.session_state.get("stats_page_size") or 100)
+                first_seen_map = fetch_user_first_seen(
+                    base_url=base_url,
+                    headers=headers,
+                    from_iso=from_iso,
+                    envs=envs,
+                    page_size=page_size,
+                    page_limit=int(stats_page_limit),
+                    retry=3,
+                    backoff=0.75,
+                    debug_out=debug_out,
+                )
+                user_first_seen_df_new = pd.DataFrame(
+                    [{"user_id": k, "first_seen": v} for k, v in (first_seen_map or {}).items()]
+                )
+                if len(user_first_seen_df_new):
+                    user_first_seen_df_new["first_seen"] = pd.to_datetime(
+                        user_first_seen_df_new["first_seen"], errors="coerce", utc=True
+                    )
+                    user_first_seen_df_new = user_first_seen_df_new.dropna(subset=["first_seen"])
+                    user_first_seen_df_new = user_first_seen_df_new.sort_values("first_seen")
+                st.session_state.analytics_user_first_seen = user_first_seen_df_new
+                st.session_state.analytics_user_first_seen_debug = debug_out
+                st.success(f"Fetched first-seen for {len(user_first_seen_df_new):,} users")
+            except Exception as e:
+                st.session_state.analytics_user_first_seen_debug = debug_out
+                st.error(f"Could not fetch user first-seen: {e}")
+
+    with btn_c2:
+        if isinstance(cached_df, pd.DataFrame) and len(cached_df):
+            st.download_button(
+                "⬇️ Download user data",
+                csv_bytes_any(cached_df.assign(first_seen=cached_df["first_seen"].astype(str)).to_dict("records")),
+                "user_first_seen.csv",
+                "text/csv",
+                key="analytics_user_first_seen_csv",
+                use_container_width=True,
+            )
+        else:
+            st.button("⬇️ Download user data", disabled=True, use_container_width=True)
+
+    debug_df = st.session_state.get("analytics_user_first_seen_debug")
+    if isinstance(debug_df, dict) and debug_df:
+        with st.expander("User fetch debug", expanded=False):
+            st.json(debug_df)
+
+    if user_first_seen_df is not None and len(user_first_seen_df) and "user_id" in df.columns:
+        try:
+            _active_users_dbg = (
+                df["user_id"]
+                .dropna()
+                .astype(str)
+                .map(lambda x: x.strip())
+                .loc[lambda s: s.ne("")]
+                .loc[lambda s: ~s.str.contains("machine", case=False, na=False)]
+            )
+            _active_users_set_dbg = set(_active_users_dbg.unique())
+
+            _first_seen_dbg = user_first_seen_df.copy()
+            _first_seen_dbg = _first_seen_dbg.dropna(subset=["user_id", "first_seen"])
+            _first_seen_dbg["user_id"] = _first_seen_dbg["user_id"].astype(str).map(lambda x: x.strip())
+            _first_seen_dbg = _first_seen_dbg[_first_seen_dbg["user_id"].ne("")]
+            _first_seen_dbg = _first_seen_dbg[
+                ~_first_seen_dbg["user_id"].astype(str).str.contains("machine", case=False, na=False)
+            ]
+            _first_seen_dbg = _first_seen_dbg[_first_seen_dbg["user_id"].isin(_active_users_set_dbg)]
+
+            _matched = int(_first_seen_dbg["user_id"].nunique())
+            _unknown = int(len(_active_users_set_dbg) - len(set(_first_seen_dbg["user_id"].tolist())))
+            _min_fs = pd.to_datetime(_first_seen_dbg["first_seen"], errors="coerce", utc=True).min()
+            _max_fs = pd.to_datetime(_first_seen_dbg["first_seen"], errors="coerce", utc=True).max()
+
+            with st.expander("User first-seen coverage (debug)", expanded=False):
+                st.write(
+                    {
+                        "active_users_in_loaded_traces": int(len(_active_users_set_dbg)),
+                        "active_users_with_first_seen": _matched,
+                        "active_users_missing_first_seen": _unknown,
+                        "first_seen_min": str(_min_fs) if pd.notna(_min_fs) else None,
+                        "first_seen_max": str(_max_fs) if pd.notna(_max_fs) else None,
+                    }
+                )
+        except Exception:
+            pass
     summary_text = f"""📊 *GNW Trace Analytics Report*
 📅 {start_date} → {end_date} ({(end_date - start_date).days + 1} days)
 
@@ -451,6 +383,9 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 • Total traces: {total_traces:,}
 • Unique users: {unique_users:,}
 • Unique threads: {unique_threads:,}
+• Total users (all time): {user_first_seen_total_users:,}
+• New users (in range): {user_first_seen_new_users:,}
+• Returning users (in range): {user_first_seen_returning_users:,}
 
 *Outcomes*
 • Success rate: {success_rate:.1%}
@@ -479,6 +414,11 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of API calls/prompts in the period"},
             {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one request"},
             {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation sessions (multi-turn chats)"},
+            {"Section": "Volume", "Metric": "Total users (all time)", "Value": f"{user_first_seen_total_users:,}", "Description": "Distinct user IDs seen since 2025-09-17 in Langfuse"},
+            {"Section": "Volume", "Metric": "New users (in range)", "Value": f"{user_first_seen_new_users:,}", "Description": "Users whose first-ever trace date falls within the selected range"},
+            {"Section": "Volume", "Metric": "Returning users (in range)", "Value": f"{user_first_seen_returning_users:,}", "Description": "Users active in range whose first-ever trace was before the range"},
+            {"Section": "Volume", "Metric": "Active users missing first-seen", "Value": f"{user_first_seen_unknown_users:,}", "Description": "Active users in the loaded traces that are not present in the all-time first-seen table (usually means the user scan was capped or stopped early)"},
+            {"Section": "Volume", "Metric": "Filled first-seen from window", "Value": f"{user_first_seen_filled_from_window:,}", "Description": "How many active users were missing from the all-time table and had their first-seen approximated from the loaded window (counts still add up, but classification may be wrong if history is missing)"},
             {"Section": "Outcomes", "Metric": "Success rate", "Value": f"{success_rate:.1%}", "Description": "% of traces that returned a valid answer"},
             {"Section": "Outcomes", "Metric": "Defer rate", "Value": f"{defer_rate:.1%}", "Description": "% of traces where the system deferred (e.g. out of scope)"},
             {"Section": "Outcomes", "Metric": "Soft error rate", "Value": f"{soft_error_rate:.1%}", "Description": "% of traces with partial/soft failures"},
@@ -627,7 +567,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 
     if "date" in df.columns and df["date"].notna().any():
         base_daily = df.dropna(subset=["date"]).copy()
-        base_daily["date"] = pd.to_datetime(base_daily["date"])
+        base_daily["date"] = pd.to_datetime(base_daily["date"], utc=True).dt.date
 
         def _q(s: pd.Series, q: float) -> float:
             try:
@@ -679,10 +619,41 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 
         # Additional insight: User activity over time (new vs returning)
         if "user_id" in base_daily.columns:
-            user_first_seen = base_daily.groupby("user_id")["date"].min().reset_index()
-            user_first_seen.columns = ["user_id", "first_seen"]
-            base_daily_with_first = base_daily.merge(user_first_seen, on="user_id", how="left")
-            base_daily_with_first["is_new"] = base_daily_with_first["date"] == base_daily_with_first["first_seen"]
+            base_user_days = base_daily.dropna(subset=["date", "user_id"]).copy()
+            base_user_days["user_id"] = base_user_days["user_id"].astype(str).map(lambda x: x.strip())
+            base_user_days = base_user_days[base_user_days["user_id"].ne("")]
+            base_user_days = base_user_days[
+                ~base_user_days["user_id"].astype(str).str.contains("machine", case=False, na=False)
+            ]
+            base_user_days = base_user_days.drop_duplicates(subset=["date", "user_id"])
+
+            if user_first_seen_df is not None and len(user_first_seen_df):
+                first_seen_for_chart = user_first_seen_df.copy()
+                first_seen_for_chart = first_seen_for_chart.dropna(subset=["user_id", "first_seen"])
+                first_seen_for_chart["user_id"] = first_seen_for_chart["user_id"].astype(str).map(lambda x: x.strip())
+                first_seen_for_chart = first_seen_for_chart[first_seen_for_chart["user_id"].ne("")]
+                first_seen_for_chart = first_seen_for_chart[
+                    ~first_seen_for_chart["user_id"].astype(str).str.contains("machine", case=False, na=False)
+                ]
+                base_daily_with_first = base_user_days.merge(
+                    first_seen_for_chart[["user_id", "first_seen"]],
+                    on="user_id",
+                    how="left",
+                )
+                base_daily_with_first["first_seen"] = pd.to_datetime(
+                    base_daily_with_first["first_seen"], errors="coerce", utc=True
+                )
+                base_daily_with_first["first_seen_date"] = base_daily_with_first["first_seen"].dt.date
+                base_daily_with_first["is_new"] = (
+                    base_daily_with_first["first_seen_date"] == base_daily_with_first["date"]
+                )
+            else:
+                user_first_seen = base_user_days.groupby("user_id")["date"].min().reset_index()
+                user_first_seen.columns = ["user_id", "first_seen_date"]
+                base_daily_with_first = base_user_days.merge(user_first_seen, on="user_id", how="left")
+                base_daily_with_first["is_new"] = (
+                    base_daily_with_first["date"] == base_daily_with_first["first_seen_date"]
+                )
 
             new_returning = (
                 base_daily_with_first.groupby("date")
@@ -694,7 +665,10 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             )
 
             if len(new_returning) > 1:
-                st.markdown("#### New vs Returning users", help="New users are seeing the product for the first time in this dataset. Returning users have been active on a previous day.")
+                st.markdown(
+                    "#### New vs Returning users",
+                    help="New users have their first-ever trace date on that day. Returning users were first seen before that day.",
+                )
                 new_returning["day_total_users"] = new_returning["new_users"] + new_returning["returning_users"]
                 nr_long = new_returning.melt(
                     id_vars=["date", "day_total_users"],
@@ -707,13 +681,15 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                     "new_users": "New",
                     "returning_users": "Returning",
                 })
+
+                color_scale = alt.Scale(domain=["New", "Returning"], range=["#2e90fa", "#98a2b3"])
                 nr_chart = (
                     alt.Chart(nr_long)
                     .mark_bar(size=17)
                     .encode(
                         x=alt.X("date:T", title="Date"),
                         y=alt.Y("count:Q", title="Users", stack=True),
-                        color=alt.Color("user_type:N", title="User type", sort=["New", "Returning"]),
+                        color=alt.Color("user_type:N", title="User type", sort=["New", "Returning"], scale=color_scale),
                         tooltip=[
                             alt.Tooltip("date:T", title="Date"),
                             alt.Tooltip("user_type:N", title="Type"),
@@ -723,7 +699,46 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                     )
                     .properties(height=220)
                 )
-                st.altair_chart(nr_chart, width="stretch")
+
+                total_new = int(new_returning["new_users"].sum())
+                total_returning = int(new_returning["returning_users"].sum())
+                pie_df = pd.DataFrame(
+                    [
+                        {"user_type": "New", "count": total_new},
+                        {"user_type": "Returning", "count": total_returning},
+                    ]
+                )
+                pie_df = pie_df[pie_df["count"] > 0]
+                pie_df["percent"] = pie_df["count"] / max(1, int(pie_df["count"].sum())) * 100
+
+                nr_pie = (
+                    alt.Chart(pie_df)
+                    .mark_arc(innerRadius=55)
+                    .encode(
+                        theta=alt.Theta("count:Q", title="Users"),
+                        color=alt.Color("user_type:N", title="", sort=["New", "Returning"], scale=color_scale),
+                        tooltip=[
+                            alt.Tooltip("user_type:N", title="Type"),
+                            alt.Tooltip("count:Q", title="Users", format=","),
+                            alt.Tooltip("percent:Q", title="%", format=".1f"),
+                        ],
+                    )
+                    .properties(height=220)
+                )
+
+                nr_c1, nr_c2 = st.columns(2)
+                with nr_c1:
+                    st.markdown(
+                        "##### Daily new vs returning (stacked)",
+                        help="For each day: new users first appear on that day; returning users were seen before that day.",
+                    )
+                    st.altair_chart(nr_chart, width="stretch")
+                with nr_c2:
+                    st.markdown(
+                        "##### Total new vs returning (range)",
+                        help="Totals across the selected date range (sum of daily unique user counts).",
+                    )
+                    st.altair_chart(nr_pie, width="stretch")
 
     def _norm_prompt(s: Any) -> str:
         if not isinstance(s, str):
@@ -1356,126 +1371,3 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                 st.metric("Agent recovered", f"{recovered:,}")
             with ec4:
                 st.metric("Hidden errors", f"{hidden_errors:,}")
-
-    if has_enrichment_cache and is_default_enrich_prompt:
-        has_enrich_data = any(
-            col in df.columns for col in ["enrich_query_flavour", "enrich_topics", "enrich_datasets"]
-        )
-        if has_enrich_data:
-            st.markdown("### Enrichment Insights", help="AI-generated classifications of user prompts: query type, topics, and datasets mentioned.")
-
-            pie_c1, pie_c2, pie_c3 = st.columns(3)
-
-            with pie_c1:
-                if "enrich_query_flavour" in df.columns:
-                    st.markdown("#### Query flavour", help="High-level intent type for queries (e.g., compare, trend, explain).")
-                    chart = category_pie_chart(df["enrich_query_flavour"], "query_flavour", "Query flavour")
-                    if chart:
-                        st.altair_chart(chart, width="stretch")
-
-            with pie_c2:
-                if "enrich_topics" in df.columns:
-                    st.markdown("#### Top topics", help="Most common topics inferred from prompts.")
-                    chart = category_pie_chart(df["enrich_topics"], "topic", "Top topics", explode_csv=True)
-                    if chart:
-                        st.altair_chart(chart, width="stretch")
-
-            with pie_c3:
-                if "enrich_datasets" in df.columns:
-                    st.markdown("#### Top datasets", help="Most commonly mentioned datasets inferred from prompts.")
-                    chart = category_pie_chart(df["enrich_datasets"], "dataset", "Top datasets", explode_csv=True)
-                    if chart:
-                        st.altair_chart(chart, width="stretch")
-
-    if has_enrichment_cache:
-        st.markdown("### Prompt enrichment", help="Detailed breakdowns by enrichment categories. Useful for finding which query types have lower success rates.")
-
-        breakdown_top_n = st.number_input("Breakdowns: top N categories", min_value=3, max_value=50, value=15)
-
-        def _metric_table(group_key: str, keys: pd.Series) -> pd.DataFrame:
-            if not isinstance(keys, pd.Series):
-                return pd.DataFrame()
-
-            # If `keys` comes from an explode(), it will typically have duplicate index labels.
-            # Assigning it directly triggers pandas reindexing (and can crash with
-            # "cannot reindex on an axis with duplicate labels"). Instead, expand the
-            # base rows to match `keys` and assign by position.
-            try:
-                base = df.loc[keys.index].copy()
-            except Exception:
-                base = df.copy()
-                keys = keys.reset_index(drop=True)
-                base = base.reset_index(drop=True)
-
-            base["_group"] = list(keys.values)
-            base = base[base["_group"].notna()]
-            if not len(base):
-                return pd.DataFrame()
-
-            def _q(s: pd.Series, q: float) -> float:
-                try:
-                    return float(s.dropna().quantile(q))
-                except Exception:
-                    return 0.0
-
-            out = (
-                base.groupby("_group", dropna=True)
-                .agg(
-                    traces=("trace_id", "count"),
-                    success_rate=("outcome", lambda x: float((x == "ANSWER").mean())),
-                    defer_rate=("outcome", lambda x: float((x == "DEFER").mean())),
-                    soft_error_rate=("outcome", lambda x: float((x == "SOFT_ERROR").mean())),
-                    error_rate=("outcome", lambda x: float((x == "ERROR").mean())),
-                    mean_cost=("total_cost", lambda x: float(pd.to_numeric(x, errors="coerce").dropna().mean()) if len(pd.to_numeric(x, errors="coerce").dropna()) else 0.0),
-                    p95_cost=("total_cost", lambda x: _q(pd.to_numeric(x, errors="coerce"), 0.95)),
-                    mean_latency=("latency_seconds", lambda x: float(pd.to_numeric(x, errors="coerce").dropna().mean()) if len(pd.to_numeric(x, errors="coerce").dropna()) else 0.0),
-                    p95_latency=("latency_seconds", lambda x: _q(pd.to_numeric(x, errors="coerce"), 0.95)),
-                )
-                .reset_index()
-                .rename(columns={"_group": group_key})
-            )
-            out = out.sort_values("traces", ascending=False).head(int(breakdown_top_n))
-            return out
-
-        def _explode_csv_series(s: pd.Series) -> pd.Series:
-            return (
-                s.fillna("")
-                .astype(str)
-                .str.split(",")
-                .explode()
-                .astype(str)
-                .str.strip()
-                .replace({"": None})
-            )
-
-        st.markdown("### Enrichment breakdowns")
-
-        lang_tbl = pd.DataFrame()
-        if "lang_query" in df.columns:
-            lang_tbl = _metric_table("language", df["lang_query"].replace({"": None}))
-        if len(lang_tbl):
-            st.markdown("#### By language")
-            st.dataframe(lang_tbl, width="stretch", hide_index=True)
-            chart = success_rate_bar_chart(lang_tbl, "language", "Language")
-            if chart:
-                st.altair_chart(chart, width="stretch")
-
-        flav_tbl = pd.DataFrame()
-        if "enrich_query_flavour" in df.columns:
-            flav_tbl = _metric_table("query_flavour", df["enrich_query_flavour"].replace({"": None}))
-        if len(flav_tbl):
-            st.markdown("#### By query flavour")
-            st.dataframe(flav_tbl, width="stretch", hide_index=True)
-            chart = success_rate_bar_chart(flav_tbl, "query_flavour", "Query flavour")
-            if chart:
-                st.altair_chart(chart, width="stretch")
-
-        if "enrich_datasets" in df.columns:
-            keys = _explode_csv_series(df["enrich_datasets"])
-            dt = _metric_table("dataset", keys)
-            if len(dt):
-                st.markdown("#### By dataset")
-                st.dataframe(dt, width="stretch", hide_index=True)
-
-        if "enrich_topics" in df.columns:
-            keys = _explode_csv_series(df["enrich_topics"])

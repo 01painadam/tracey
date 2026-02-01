@@ -207,8 +207,8 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             stats_page_limit = st.number_input(
                 "Max pages",
                 min_value=1,
-                max_value=500,
-                value=50,
+                max_value=1000,
+                value=500,
                 key="stats_page_limit",
             )
             stats_page_size = st.number_input(
@@ -222,8 +222,8 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             stats_max_traces = st.number_input(
                 "Max traces",
                 min_value=1,
-                max_value=200_000,
-                value=25_000,
+                max_value=200000,
+                value=25000,
                 key="stats_max_traces",
             )
 
