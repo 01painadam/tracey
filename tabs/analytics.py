@@ -179,11 +179,13 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     user_first_seen_returning_users = 0
     user_first_seen_unknown_users = 0
     user_first_seen_filled_from_window = 0
+    has_user_first_seen = False
 
     if isinstance(st.session_state.get("analytics_user_first_seen"), pd.DataFrame):
         user_first_seen_df = st.session_state.get("analytics_user_first_seen")
 
     if user_first_seen_df is not None and len(user_first_seen_df):
+        has_user_first_seen = True
         user_first_seen_total_users = int(len(user_first_seen_df))
 
         if "user_id" in df.columns and df["user_id"].notna().any():
@@ -333,11 +335,10 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         else:
             st.button("⬇️ Download user data", disabled=True, width="stretch")
 
-    debug_df = st.session_state.get("analytics_user_first_seen_debug")
-    if isinstance(debug_df, dict) and debug_df:
-        with st.expander("User fetch debug", expanded=False):
-            st.json(debug_df)
+    if not has_user_first_seen:
+        st.info("Fetch **all time user data** to enable New vs Returning user metrics.")
 
+    user_first_seen_coverage_debug: dict[str, Any] | None = None
     if user_first_seen_df is not None and len(user_first_seen_df) and "user_id" in df.columns:
         try:
             _active_users_dbg = (
@@ -364,18 +365,31 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             _min_fs = pd.to_datetime(_first_seen_dbg["first_seen"], errors="coerce", utc=True).min()
             _max_fs = pd.to_datetime(_first_seen_dbg["first_seen"], errors="coerce", utc=True).max()
 
-            with st.expander("User first-seen coverage (debug)", expanded=False):
-                st.write(
-                    {
-                        "active_users_in_loaded_traces": int(len(_active_users_set_dbg)),
-                        "active_users_with_first_seen": _matched,
-                        "active_users_missing_first_seen": _unknown,
-                        "first_seen_min": str(_min_fs) if pd.notna(_min_fs) else None,
-                        "first_seen_max": str(_max_fs) if pd.notna(_max_fs) else None,
-                    }
-                )
+            user_first_seen_coverage_debug = {
+                "active_users_in_loaded_traces": int(len(_active_users_set_dbg)),
+                "active_users_with_first_seen": _matched,
+                "active_users_missing_first_seen": _unknown,
+                "first_seen_min": str(_min_fs) if pd.notna(_min_fs) else None,
+                "first_seen_max": str(_max_fs) if pd.notna(_max_fs) else None,
+            }
         except Exception:
-            pass
+            user_first_seen_coverage_debug = None
+
+    debug_df = st.session_state.get("analytics_user_first_seen_debug")
+    if isinstance(debug_df, dict) and debug_df:
+        with st.expander("User fetch debug", expanded=False):
+            if isinstance(user_first_seen_coverage_debug, dict) and user_first_seen_coverage_debug:
+                st.write(user_first_seen_coverage_debug)
+            st.json(debug_df)
+    if has_user_first_seen:
+        user_lines = (
+            f"• Total users (all time): {user_first_seen_total_users:,}\n"
+            f"• New users (since {start_date}): {user_first_seen_new_users:,}\n"
+            f"• Returning users (since {start_date}): {user_first_seen_returning_users:,}\n"
+        )
+    else:
+        user_lines = ""
+
     summary_text = f"""📊 *GNW Trace Analytics Report*
 📅 {start_date} → {end_date} ({(end_date - start_date).days + 1} days)
 
@@ -383,9 +397,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 • Total traces: {total_traces:,}
 • Unique users: {unique_users:,}
 • Unique threads: {unique_threads:,}
-• Total users (all time): {user_first_seen_total_users:,}
-• New users (in range): {user_first_seen_new_users:,}
-• Returning users (in range): {user_first_seen_returning_users:,}
+{user_lines}
 
 *Outcomes*
 • Success rate: {success_rate:.1%}
@@ -409,16 +421,24 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     with st.expander("📋 Copy summary for Slack", expanded=False):
         st.code(summary_text, language=None)
 
-    summary_tbl = pd.DataFrame(
+    summary_rows = [
+        {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of API calls/prompts in the period"},
+        {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one request"},
+        {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation sessions (multi-turn chats)"},
+    ]
+    if has_user_first_seen:
+        summary_rows.extend(
+            [
+                {"Section": "Volume", "Metric": "Total users (all time)", "Value": f"{user_first_seen_total_users:,}", "Description": "Distinct user IDs seen since 2025-09-17 in Langfuse"},
+                {"Section": "Volume", "Metric": f"New users (since {start_date})", "Value": f"{user_first_seen_new_users:,}", "Description": "Users whose first-ever trace date falls within the selected range"},
+                {"Section": "Volume", "Metric": f"Returning users (since {start_date})", "Value": f"{user_first_seen_returning_users:,}", "Description": f"Users active since {start_date} whose first-ever trace was before the range"},
+                {"Section": "Volume", "Metric": "Active users missing first-seen", "Value": f"{user_first_seen_unknown_users:,}", "Description": "Active users in the loaded traces that are not present in the all-time first-seen table (usually means the user scan was capped or stopped early)"},
+                {"Section": "Volume", "Metric": "Filled first-seen from window", "Value": f"{user_first_seen_filled_from_window:,}", "Description": "How many active users were missing from the all-time table and had their first-seen approximated from the loaded window (counts still add up, but classification may be wrong if history is missing)"},
+            ]
+        )
+
+    summary_rows.extend(
         [
-            {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of API calls/prompts in the period"},
-            {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one request"},
-            {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation sessions (multi-turn chats)"},
-            {"Section": "Volume", "Metric": "Total users (all time)", "Value": f"{user_first_seen_total_users:,}", "Description": "Distinct user IDs seen since 2025-09-17 in Langfuse"},
-            {"Section": "Volume", "Metric": "New users (in range)", "Value": f"{user_first_seen_new_users:,}", "Description": "Users whose first-ever trace date falls within the selected range"},
-            {"Section": "Volume", "Metric": "Returning users (in range)", "Value": f"{user_first_seen_returning_users:,}", "Description": "Users active in range whose first-ever trace was before the range"},
-            {"Section": "Volume", "Metric": "Active users missing first-seen", "Value": f"{user_first_seen_unknown_users:,}", "Description": "Active users in the loaded traces that are not present in the all-time first-seen table (usually means the user scan was capped or stopped early)"},
-            {"Section": "Volume", "Metric": "Filled first-seen from window", "Value": f"{user_first_seen_filled_from_window:,}", "Description": "How many active users were missing from the all-time table and had their first-seen approximated from the loaded window (counts still add up, but classification may be wrong if history is missing)"},
             {"Section": "Outcomes", "Metric": "Success rate", "Value": f"{success_rate:.1%}", "Description": "% of traces that returned a valid answer"},
             {"Section": "Outcomes", "Metric": "Defer rate", "Value": f"{defer_rate:.1%}", "Description": "% of traces where the system deferred (e.g. out of scope)"},
             {"Section": "Outcomes", "Metric": "Soft error rate", "Value": f"{soft_error_rate:.1%}", "Description": "% of traces with partial/soft failures"},
@@ -434,6 +454,8 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             {"Section": "Engagement", "Metric": "p95 prompts/user/day", "Value": f"{util_p95_prompts:.0f}", "Description": "Top 5% of users send this many prompts or more per day"},
         ]
     )
+
+    summary_tbl = pd.DataFrame(summary_rows)
     st.dataframe(summary_tbl, width="stretch", hide_index=True)
 
     report_rows = [

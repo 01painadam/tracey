@@ -42,8 +42,8 @@ def main() -> None:
             "_Ta, Trace!_\n\n"
             "- **📥 Fetch** a single set of traces once\n"
             "- **📊 Explore** the same dataset across tabs\n"
-            "- **📋 Generate** reports & understand user behaviour"
-            "- **🧪 Sample** for human eval & product mining\n"
+            "- **📋 Generate** reports & understand user behaviour\n"
+            "- **🧪 Sample** for human eval & product mining"
         )
 
         st.markdown("---")
@@ -306,10 +306,10 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
 
     tabs = st.tabs([
         "📊 Analytics Report",
-        "🔗 Conversation URLs",
-        "✅ Human eval tool",
-        "🧠 Product intelligence",
+        "✅ Human Eval tool",
+        "🧠 Product Intelligence",
         "🔎 Trace Explorer",
+        "🔗 Conversation Browser",
     ])
 
     with tabs[0]:
@@ -328,24 +328,24 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         )
 
     with tabs[1]:
-        render_session_urls(
-            base_thread_url=base_thread_url,
-        )
-
-    with tabs[2]:
         render_human_eval(
             base_thread_url=base_thread_url,
             gemini_api_key=gemini_api_key,
         )
 
-    with tabs[3]:
+    with tabs[2]:
         render_product_dev(
             base_thread_url=base_thread_url,
             gemini_api_key=gemini_api_key,
         )
 
-    with tabs[4]:
+    with tabs[3]:
         render_trace_explorer(
+            base_thread_url=base_thread_url,
+        )
+
+    with tabs[4]:
+        render_session_urls(
             base_thread_url=base_thread_url,
         )
 
