@@ -552,13 +552,13 @@ Thank you for your contribution! 🙏
                 st.button("⛓️‍💥 No link", disabled=True, width="stretch")
 
         notes = st.text_area(
-            "📝 Notes (optional)",
-            height=120,
+            label="📝 Add notes _(optional)_",
+            height=200,
             key="_eval_notes",
-            placeholder="Add notes to justify your rating...",
+            placeholder="Explain your choice of rating..."
         )
 
-        st.markdown("**Rate this response**")
+        st.markdown("**✅ Submit a rating for this response**", help="NOTE: You can only rate a response once.")
         r1, r2, r3 = st.columns(3)
         with r1:
             if st.button(

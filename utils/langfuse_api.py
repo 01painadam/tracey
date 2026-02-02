@@ -7,6 +7,7 @@ import os
 import time as time_mod
 from pathlib import Path
 from typing import Any
+from datetime import date
 
 import requests
 
@@ -273,6 +274,7 @@ def fetch_user_first_seen(
     cache_root = Path(cache_dir) if isinstance(cache_dir, str) and cache_dir.strip() else _default_cache_dir()
     cache_payload = {
         "kind": "fetch_user_first_seen",
+        "cache_day": date.today().isoformat(),
         "base_url": base_url,
         "from_iso": from_iso,
         "envs": envs or [],
@@ -411,6 +413,55 @@ def fetch_user_first_seen(
             debug_out["cache_path"] = str(cache_path)
 
     return first_seen
+
+
+def user_first_seen_cache_path(
+    *,
+    base_url: str,
+    from_iso: str,
+    envs: list[str] | None,
+    page_size: int,
+    page_limit: int,
+    cache_dir: str | None = None,
+) -> Path:
+    cache_root = Path(cache_dir) if isinstance(cache_dir, str) and cache_dir.strip() else _default_cache_dir()
+    cache_payload = {
+        "kind": "fetch_user_first_seen",
+        "cache_day": date.today().isoformat(),
+        "base_url": base_url,
+        "from_iso": from_iso,
+        "envs": envs or [],
+        "page_size": int(page_size),
+        "page_limit": int(page_limit),
+        "exclude_machine_users": True,
+    }
+    return _cache_path("user_first_seen", cache_payload, cache_root)
+
+
+def invalidate_user_first_seen_cache(
+    *,
+    base_url: str,
+    from_iso: str,
+    envs: list[str] | None,
+    page_size: int,
+    page_limit: int,
+    cache_dir: str | None = None,
+) -> bool:
+    path = user_first_seen_cache_path(
+        base_url=base_url,
+        from_iso=from_iso,
+        envs=envs,
+        page_size=page_size,
+        page_limit=page_limit,
+        cache_dir=cache_dir,
+    )
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def extract_datasets_from_session(langfuse: Any, session_id: str) -> str:

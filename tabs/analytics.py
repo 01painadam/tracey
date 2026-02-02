@@ -16,6 +16,7 @@ from utils import (
     final_ai_message,
     classify_outcome,
     fetch_user_first_seen,
+    invalidate_user_first_seen_cache,
     extract_trace_context,
     extract_tool_calls_and_results,
     extract_tool_flow,
@@ -287,9 +288,10 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         "Uses the sidebar 'Max pages' + 'Traces per page' limits."
     )
     cached_df = st.session_state.get("analytics_user_first_seen")
-    btn_c1, btn_c2 = st.columns([1, 1])
+    btn_c1, btn_c2, btn_c3 = st.columns([1, 1, 1])
     with btn_c1:
-        if st.button("👥 Fetch all time user data", type="secondary"):
+        fetch_btn_type = "secondary" if has_user_first_seen else "primary"
+        if st.button("👥 Fetch all-time user data", type=fetch_btn_type, width="stretch"):
             debug_out: dict[str, Any] = {}
             try:
                 headers = get_langfuse_headers(public_key, secret_key)
@@ -334,6 +336,24 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             )
         else:
             st.button("⬇️ Download user data", disabled=True, width="stretch")
+
+    with btn_c3:
+        if st.button("🧹 Invalidate cache", disabled=not has_user_first_seen, width="stretch"):
+            from_iso = datetime(2025, 9, 17, tzinfo=timezone.utc).isoformat()
+            page_size = int(st.session_state.get("stats_page_size") or 100)
+            removed = invalidate_user_first_seen_cache(
+                base_url=base_url,
+                from_iso=from_iso,
+                envs=envs,
+                page_size=page_size,
+                page_limit=int(stats_page_limit),
+            )
+            st.session_state.analytics_user_first_seen = None
+            if removed:
+                st.toast("Cache cleared ✅")
+            else:
+                st.toast("No cache file found (cleared session cache) ⚠️")
+            st.rerun()
 
     if not has_user_first_seen:
         st.info("Fetch **all time user data** to enable New vs Returning user metrics.")

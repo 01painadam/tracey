@@ -4,6 +4,7 @@ from utils.langfuse_api import (
     get_langfuse_headers,
     fetch_traces_window,
     fetch_user_first_seen,
+    invalidate_user_first_seen_cache,
     extract_datasets_from_session,
 )
 from utils.trace_parsing import (
@@ -57,6 +58,7 @@ __all__ = [
     "get_langfuse_headers",
     "fetch_traces_window",
     "fetch_user_first_seen",
+    "invalidate_user_first_seen_cache",
     "extract_datasets_from_session",
     # Trace parsing
     "normalize_trace_format",
