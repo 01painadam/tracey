@@ -66,6 +66,7 @@ def fetch_traces_window(
     max_traces: int,
     retry: int,
     backoff: float,
+    http_timeout_s: float = 30,
     debug_out: dict[str, Any] | None = None,
     use_disk_cache: bool = True,
     cache_dir: str | None = None,
@@ -118,6 +119,7 @@ def fetch_traces_window(
                 "requested_page_size": requested_limit,
                 "page_size": limit,
                 "min_page_size": min_limit,
+                "http_timeout_s": float(http_timeout_s),
                 "pages": [],
                 "limit_adjustments": [],
                 "stopped_early_reason": None,
@@ -138,7 +140,7 @@ def fetch_traces_window(
         last_error: str | None = None
         while True:
             t0 = time_mod.time()
-            r = session.get(url, headers=headers, params=params, timeout=30)
+            r = session.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
             elapsed_s = time_mod.time() - t0
             if r.status_code < 400:
                 last_error = None
@@ -258,6 +260,7 @@ def fetch_user_first_seen(
     page_limit: int,
     retry: int,
     backoff: float,
+    http_timeout_s: float = 30,
     debug_out: dict[str, Any] | None = None,
     use_disk_cache: bool = True,
     cache_dir: str | None = None,
@@ -306,6 +309,7 @@ def fetch_user_first_seen(
                 "page_limit": int(page_limit),
                 "requested_page_size": int(requested_limit),
                 "page_size": int(limit),
+                "http_timeout_s": float(http_timeout_s),
                 "pages": [],
                 "stopped_early_reason": None,
             }
@@ -329,7 +333,7 @@ def fetch_user_first_seen(
         last_error: str | None = None
         while True:
             t0 = time_mod.time()
-            r = session.get(url, headers=headers, params=params, timeout=30)
+            r = session.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
             elapsed_s = time_mod.time() - t0
             if r.status_code < 400:
                 last_error = None

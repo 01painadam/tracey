@@ -1,5 +1,6 @@
 import os
 import hmac
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 import inspect
 from typing import Any
@@ -122,8 +123,9 @@ def main() -> None:
                 value=default_end,
             )
         else:
-            start_date = default_start
+            start_date = date(2025, 9, 17)  # Launch date
             end_date = default_end
+            st.caption(f"Using {start_date} to {end_date}")
 
         if "stats_traces" not in st.session_state:
             st.session_state.stats_traces = []
@@ -237,6 +239,14 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                 value=500,
                 key="stats_page_limit",
             )
+            stats_http_timeout_s = st.number_input(
+                "HTTP timeout (seconds)",
+                min_value=5,
+                max_value=600,
+                value=60,
+                key="stats_http_timeout_s",
+                help="If multi-month fetches time out, increase this (e.g. 120-300s).",
+            )
             stats_page_size = st.number_input(
                 "Traces per page",
                 min_value=1,
@@ -252,80 +262,166 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                 value=25000,
                 key="stats_max_traces",
             )
+            stats_parallel_workers = st.number_input(
+                "Parallel workers",
+                min_value=1,
+                max_value=5,
+                value=3,
+                key="stats_parallel_workers",
+                help="Number of weekly chunks to fetch in parallel. Higher = faster but more server load.",
+            )
 
             base_thread_url = f"https://www.{'staging.' if environment == 'staging' else ''}globalnaturewatch.org/app/threads"
 
         if fetch_clicked:
             if not public_key or not secret_key or not base_url:
                 st.error("Missing LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL")
-            elif not use_date_filter:
-                st.error("Pick a date range other than 'All' to fetch traces.")
             else:
                 if start_date > end_date:
                     st.error("Start date must be on or before end date")
                 else:
                     headers = get_langfuse_headers(public_key, secret_key)
-                    from_iso = iso_utc(datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc))
-                    to_iso = iso_utc(datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc))
-                    with fetch_status.status("Fetching traces...", expanded=False):
-                        fetch_debug: dict[str, Any] = {}
+                    
+                    # Determine if we need to chunk (use 5-day blocks for ranges >5 days)
+                    date_range_days = (end_date - start_date).days
+                    chunk_by_block = date_range_days > 5
+                    
+                    if chunk_by_block:
+                        # Split into 5-day chunks
+                        chunks: list[tuple[int, date, date]] = []
+                        current_start = start_date
+                        idx = 1
+                        while current_start <= end_date:
+                            current_end = min(current_start + timedelta(days=4), end_date)
+                            chunks.append((idx, current_start, current_end))
+                            current_start = current_end + timedelta(days=1)
+                            idx += 1
+                        
+                        # Detect function signature once
                         sig = None
                         try:
                             sig = inspect.signature(fetch_traces_window)
                         except Exception:
                             sig = None
-
                         supports_debug_out = bool(sig and "debug_out" in sig.parameters)
                         supports_page_size = bool(sig and "page_size" in sig.parameters)
+                        supports_http_timeout = bool(sig and "http_timeout_s" in sig.parameters)
+                        
+                        def fetch_chunk(chunk_info: tuple[int, date, date]) -> tuple[int, date, date, list[dict[str, Any]], dict[str, Any]]:
+                            """Fetch a single chunk - runs in thread pool."""
+                            chunk_idx, chunk_start, chunk_end = chunk_info
+                            from_iso = iso_utc(datetime.combine(chunk_start, time.min).replace(tzinfo=timezone.utc))
+                            to_iso = iso_utc(datetime.combine(chunk_end, time.max).replace(tzinfo=timezone.utc))
+                            
+                            chunk_debug: dict[str, Any] = {}
+                            call_kwargs: dict[str, Any] = {
+                                "base_url": base_url,
+                                "headers": headers,
+                                "from_iso": from_iso,
+                                "to_iso": to_iso,
+                                "envs": envs,
+                                "page_limit": int(stats_page_limit),
+                                "max_traces": int(stats_max_traces),
+                                "retry": 2,
+                                "backoff": 0.5,
+                            }
+                            if supports_page_size:
+                                call_kwargs["page_size"] = int(stats_page_size)
+                            if supports_http_timeout:
+                                call_kwargs["http_timeout_s"] = float(stats_http_timeout_s)
+                            if supports_debug_out:
+                                call_kwargs["debug_out"] = chunk_debug
+                            
+                            chunk_traces = fetch_traces_window(**call_kwargs)
+                            return (chunk_idx, chunk_start, chunk_end, chunk_traces, chunk_debug)
+                        
+                        all_traces: list[dict[str, Any]] = []
+                        seen_ids: set[str] = set()
+                        fetch_debug: dict[str, Any] = {"chunks": [], "total_traces": 0, "parallel_workers": int(stats_parallel_workers)}
+                        completed_count = 0
+                        
+                        with fetch_status.status(f"Fetching traces in {len(chunks)} 5-day chunks ({stats_parallel_workers} parallel)...", expanded=True) as status:
+                            with ThreadPoolExecutor(max_workers=int(stats_parallel_workers)) as executor:
+                                futures = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
+                                
+                                for future in as_completed(futures):
+                                    completed_count += 1
+                                    try:
+                                        chunk_idx, chunk_start, chunk_end, chunk_traces, chunk_debug = future.result()
+                                        
+                                        # Deduplicate by trace ID
+                                        new_traces = 0
+                                        for trace in chunk_traces:
+                                            trace_id = trace.get("id")
+                                            if isinstance(trace_id, str) and trace_id not in seen_ids:
+                                                seen_ids.add(trace_id)
+                                                all_traces.append(trace)
+                                                new_traces += 1
+                                        
+                                        fetch_debug["chunks"].append({
+                                            "chunk": chunk_idx,
+                                            "start": chunk_start.isoformat(),
+                                            "end": chunk_end.isoformat(),
+                                            "fetched": len(chunk_traces),
+                                            "new": new_traces,
+                                            "debug": chunk_debug,
+                                        })
+                                        
+                                        status.update(label=f"Completed {completed_count}/{len(chunks)} chunks ({len(all_traces)} traces so far)")
+                                    except Exception as e:
+                                        chunk_info = futures[future]
+                                        fetch_debug["chunks"].append({
+                                            "chunk": chunk_info[0],
+                                            "start": chunk_info[1].isoformat(),
+                                            "end": chunk_info[2].isoformat(),
+                                            "error": str(e),
+                                        })
+                                        status.update(label=f"Chunk {chunk_info[0]} failed: {e}")
+                            
+                            fetch_debug["total_traces"] = len(all_traces)
+                            status.update(label=f"Fetched {len(all_traces)} total traces from {len(chunks)} chunks", state="complete")
+                        
+                        traces = all_traces
+                    else:
+                        # Single fetch for <=7 days
+                        from_iso = iso_utc(datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc))
+                        to_iso = iso_utc(datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc))
+                        
+                        with fetch_status.status("Fetching traces...", expanded=False):
+                            fetch_debug: dict[str, Any] = {}
+                            sig = None
+                            try:
+                                sig = inspect.signature(fetch_traces_window)
+                            except Exception:
+                                sig = None
 
-                        call_kwargs: dict[str, Any] = {
-                            "base_url": base_url,
-                            "headers": headers,
-                            "from_iso": from_iso,
-                            "to_iso": to_iso,
-                            "envs": envs,
-                            "page_limit": int(stats_page_limit),
-                            "max_traces": int(stats_max_traces),
-                            "retry": 2,
-                            "backoff": 0.5,
-                        }
-                        if supports_page_size:
-                            call_kwargs["page_size"] = int(stats_page_size)
+                            supports_debug_out = bool(sig and "debug_out" in sig.parameters)
+                            supports_page_size = bool(sig and "page_size" in sig.parameters)
+                            supports_http_timeout = bool(sig and "http_timeout_s" in sig.parameters)
 
-                        if supports_debug_out:
-                            call_kwargs["debug_out"] = fetch_debug
+                            call_kwargs: dict[str, Any] = {
+                                "base_url": base_url,
+                                "headers": headers,
+                                "from_iso": from_iso,
+                                "to_iso": to_iso,
+                                "envs": envs,
+                                "page_limit": int(stats_page_limit),
+                                "max_traces": int(stats_max_traces),
+                                "retry": 2,
+                                "backoff": 0.5,
+                            }
+                            if supports_page_size:
+                                call_kwargs["page_size"] = int(stats_page_size)
 
-                        if supports_debug_out or supports_page_size:
-                            traces = fetch_traces_window(
-                                **call_kwargs,
-                            )
-                        else:
-                            # Fallback for older function objects (e.g. Streamlit hot-reload holding
-                            # an older signature). You can restart Streamlit to pick up debug support.
-                            fetch_debug.update(
-                                {
-                                    "url": f"{base_url.rstrip('/')}/api/public/traces",
-                                    "from_iso": from_iso,
-                                    "to_iso": to_iso,
-                                    "envs": envs,
-                                    "page_limit": int(stats_page_limit),
-                                    "page_size": int(stats_page_size),
-                                    "max_traces": int(stats_max_traces),
-                                    "note": "fetch_traces_window() does not support debug_out in this runtime; restart Streamlit to enable per-page debug.",
-                                }
-                            )
-                            traces = fetch_traces_window(
-                                base_url=base_url,
-                                headers=headers,
-                                from_iso=from_iso,
-                                to_iso=to_iso,
-                                envs=envs,
-                                page_limit=int(stats_page_limit),
-                                max_traces=int(stats_max_traces),
-                                retry=2,
-                                backoff=0.5,
-                            )
-                        fetch_status.status(f"Fetched {len(traces)} traces", state="complete", expanded=False)
+                            if supports_http_timeout:
+                                call_kwargs["http_timeout_s"] = float(stats_http_timeout_s)
+
+                            if supports_debug_out:
+                                call_kwargs["debug_out"] = fetch_debug
+
+                            traces = fetch_traces_window(**call_kwargs)
+                            fetch_status.status(f"Fetched {len(traces)} traces", state="complete", expanded=False)
+                    
                     st.session_state.fetch_debug = fetch_debug
                     st.session_state.stats_traces = traces
                     st.rerun()
