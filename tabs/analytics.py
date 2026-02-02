@@ -54,6 +54,24 @@ def render(
     stats_max_traces: int,
 ) -> None:
     """Render the Trace Analytics Reports tab."""
+
+    def _format_report_date(d: Any) -> str:
+        try:
+            if isinstance(d, datetime):
+                dt = d
+            else:
+                dt = datetime(d.year, d.month, d.day)
+            day = int(dt.day)
+            if 11 <= (day % 100) <= 13:
+                suffix = "th"
+            else:
+                suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+            return dt.strftime("%a ") + f"{day}{suffix} " + dt.strftime("%b")
+        except Exception:
+            return str(d)
+
+    start_date_label = _format_report_date(start_date)
+    end_date_label = _format_report_date(end_date)
     st.subheader("Trace stats for selected date range")
 
     st.markdown(
@@ -281,7 +299,9 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     avg_latency = float(lat_s.mean()) if len(lat_s) else 0.0
     p95_latency = float(lat_s.quantile(0.95)) if len(lat_s) else 0.0
 
-    st.markdown(f"### Summary Statistics ({(end_date - start_date).days + 1} days: {start_date} to {end_date})")
+    st.markdown(
+        f"### Summary Statistics ({(end_date - start_date).days + 1} days: {start_date_label} to {end_date_label})"
+    )
 
     st.caption(
         "To enable true New vs Returning user metrics, fetch the all-time user first-seen table (scans traces oldest → newest starting 2025-09-17). "
@@ -404,35 +424,34 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     if has_user_first_seen:
         user_lines = (
             f"• Total users (all time): {user_first_seen_total_users:,}\n"
-            f"• New users (since {start_date}): {user_first_seen_new_users:,}\n"
-            f"• Returning users (since {start_date}): {user_first_seen_returning_users:,}\n"
+            f"• New users (since {start_date_label}): {user_first_seen_new_users:,}\n"
+            f"• Returning users (since {start_date_label}): {user_first_seen_returning_users:,}\n"
         )
     else:
         user_lines = ""
 
     summary_text = f"""📊 *GNW Trace Analytics Report*
-📅 {start_date} → {end_date} ({(end_date - start_date).days + 1} days)
+📅 {start_date_label} → {end_date_label} ({(end_date - start_date).days + 1} days)
 
-*Volume*
-• Total traces: {total_traces:,}
+**Volume**
+• Total traces (prompts): {total_traces:,}
+• Unique threads (convos): {unique_threads:,}
 • Unique users: {unique_users:,}
-• Unique threads: {unique_threads:,}
 {user_lines}
-
-*Outcomes*
+**Outcomes**
 • Success rate: {success_rate:.1%}
 • Defer rate: {defer_rate:.1%}
 • Soft error rate: {soft_error_rate:.1%}
 • Error rate: {error_rate:.1%}
 
-*Performance*
+**Performance**
 • Mean cost: ${mean_cost:.4f}
 • Median cost: ${median_cost:.4f}
 • p95 cost: ${p95_cost:.4f}
-• Avg latency: {avg_latency:.2f}s
+• Mean latency: {avg_latency:.2f}s
 • p95 latency: {p95_latency:.2f}s
 
-*Prompt utilisation*
+**Prompt utilisation**
 • User-days: {util_user_days:,}
 • Mean prompts/user/day: {util_mean_prompts:.2f}
 • Median prompts/user/day: {util_median_prompts:.0f}
@@ -442,18 +461,16 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         st.code(summary_text, language=None)
 
     summary_rows = [
-        {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of API calls/prompts in the period"},
-        {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one request"},
+        {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of prompts in the period"},
         {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation sessions (multi-turn chats)"},
+        {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one request"},
     ]
     if has_user_first_seen:
         summary_rows.extend(
             [
                 {"Section": "Volume", "Metric": "Total users (all time)", "Value": f"{user_first_seen_total_users:,}", "Description": "Distinct user IDs seen since 2025-09-17 in Langfuse"},
-                {"Section": "Volume", "Metric": f"New users (since {start_date})", "Value": f"{user_first_seen_new_users:,}", "Description": "Users whose first-ever trace date falls within the selected range"},
-                {"Section": "Volume", "Metric": f"Returning users (since {start_date})", "Value": f"{user_first_seen_returning_users:,}", "Description": f"Users active since {start_date} whose first-ever trace was before the range"},
-                {"Section": "Volume", "Metric": "Active users missing first-seen", "Value": f"{user_first_seen_unknown_users:,}", "Description": "Active users in the loaded traces that are not present in the all-time first-seen table (usually means the user scan was capped or stopped early)"},
-                {"Section": "Volume", "Metric": "Filled first-seen from window", "Value": f"{user_first_seen_filled_from_window:,}", "Description": "How many active users were missing from the all-time table and had their first-seen approximated from the loaded window (counts still add up, but classification may be wrong if history is missing)"},
+                {"Section": "Volume", "Metric": f"New users (since {start_date_label})", "Value": f"{user_first_seen_new_users:,}", "Description": f"Users whose first-ever trace was after {start_date_label}"},
+                {"Section": "Volume", "Metric": f"Returning users (since {start_date_label})", "Value": f"{user_first_seen_returning_users:,}", "Description": f"Users active within the selected range whose first-ever trace was before {start_date_label}"},
             ]
         )
 
@@ -466,7 +483,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             {"Section": "Performance", "Metric": "Mean cost", "Value": f"${mean_cost:.4f}", "Description": "Average LLM cost per trace"},
             {"Section": "Performance", "Metric": "Median cost", "Value": f"${median_cost:.4f}", "Description": "Middle value of cost distribution (less sensitive to outliers)"},
             {"Section": "Performance", "Metric": "p95 cost", "Value": f"${p95_cost:.4f}", "Description": "95th percentile cost (only 5% of traces cost more)"},
-            {"Section": "Performance", "Metric": "Average latency", "Value": f"{avg_latency:.2f}s", "Description": "Mean time from request to response"},
+            {"Section": "Performance", "Metric": "Mean latency", "Value": f"{avg_latency:.2f}s", "Description": "Mean time from request to response"},
             {"Section": "Performance", "Metric": "P95 latency", "Value": f"{p95_latency:.2f}s", "Description": "95th percentile latency (worst-case for most users)"},
             {"Section": "Engagement", "Metric": "User-days", "Value": f"{util_user_days:,}", "Description": "Total user × day combinations (one user on 3 days = 3)"},
             {"Section": "Engagement", "Metric": "Mean prompts/user/day", "Value": f"{util_mean_prompts:.2f}", "Description": "Average number of prompts a user sends per active day"},
