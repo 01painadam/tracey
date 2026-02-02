@@ -1,11 +1,13 @@
 """Trace Analytics Reports tab."""
 import json
-from datetime import datetime, timezone
+import os
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import altair as alt
 import pandas as pd
+import requests
 import streamlit as st
 
 from utils import (
@@ -54,6 +56,86 @@ def render(
     stats_max_traces: int,
 ) -> None:
     """Render the Trace Analytics Reports tab."""
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _fetch_project_zeno_merges(
+        start: date,
+        end: date,
+    ) -> dict[str, list[str]]:
+        token = os.getenv("GH_API_TOKEN", "")
+        if not token:
+            return {}
+
+        owner = "wri"
+        repo = "project-zeno"
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        since = datetime.combine(start, datetime.min.time()).replace(tzinfo=timezone.utc).isoformat()
+        until = datetime.combine(end + timedelta(days=1), datetime.min.time()).replace(tzinfo=timezone.utc).isoformat()
+
+        merges_by_day: dict[str, list[str]] = {}
+        page = 1
+        while True:
+            params = {
+                "sha": "main",
+                "since": since,
+                "until": until,
+                "per_page": 100,
+                "page": page,
+            }
+            r = requests.get(url, headers=headers, params=params, timeout=20)
+            if r.status_code >= 400:
+                return {}
+            data = r.json()
+            if not isinstance(data, list) or not data:
+                break
+
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                parents = item.get("parents")
+                if not isinstance(parents, list) or len(parents) < 2:
+                    continue
+                commit = item.get("commit")
+                if not isinstance(commit, dict):
+                    continue
+                msg = None
+                try:
+                    msg = commit.get("message")
+                except Exception:
+                    msg = None
+                if not isinstance(msg, str) or not msg.strip():
+                    continue
+                first_line = msg.splitlines()[0].strip()
+                date_str = None
+                try:
+                    committer = commit.get("committer")
+                    if isinstance(committer, dict):
+                        date_str = committer.get("date")
+                except Exception:
+                    date_str = None
+                if not isinstance(date_str, str) or not date_str.strip():
+                    continue
+                dt = pd.to_datetime(date_str, utc=True, errors="coerce")
+                if pd.isna(dt):
+                    continue
+                day = dt.date().isoformat()
+                merges_by_day.setdefault(day, []).append(first_line)
+
+            if len(data) < 100:
+                break
+            page += 1
+            if page > 20:
+                break
+
+        for k, v in list(merges_by_day.items()):
+            merges_by_day[k] = sorted(set(v))
+
+        return merges_by_day
 
     def _format_report_date(d: Any) -> str:
         try:
@@ -655,10 +737,48 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 
         st.markdown("### Daily trends", help="Track how key metrics change over time. Look for anomalies, regressions, or improvements day-over-day.")
 
+        fetch_merges_clicked = st.button(
+            "Fetch Project Zeno merges",
+            type="secondary",
+            help="Fetch merge events from wri/project-zeno (main) within the selected date range and overlay them on the daily charts.",
+        )
+
+        if fetch_merges_clicked:
+            if not os.getenv("GH_API_TOKEN", ""):
+                st.info("Set GH_API_TOKEN to enable merge overlays.")
+            else:
+                merges = _fetch_project_zeno_merges(start_date, end_date)
+                merge_events_df = pd.DataFrame(
+                    [
+                        {
+                            "date": k,
+                            "merge_titles": "\n".join(v),
+                        }
+                        for k, v in merges.items()
+                    ]
+                )
+                st.session_state.analytics_zeno_merge_events_df = merge_events_df
+                st.session_state.analytics_zeno_merge_range = {
+                    "start": getattr(start_date, "isoformat", lambda: str(start_date))(),
+                    "end": getattr(end_date, "isoformat", lambda: str(end_date))(),
+                }
+                st.rerun()
+
+        merge_events_df = st.session_state.get("analytics_zeno_merge_events_df")
+        merge_range = st.session_state.get("analytics_zeno_merge_range")
+        if isinstance(merge_range, dict):
+            if merge_range.get("start") != getattr(start_date, "isoformat", lambda: str(start_date))() or merge_range.get(
+                "end"
+            ) != getattr(end_date, "isoformat", lambda: str(end_date))():
+                merge_events_df = None
+
+        if isinstance(merge_events_df, pd.DataFrame) and len(merge_events_df):
+            st.caption("Merge overlays loaded. Hover dashed lines for merge titles.")
+
         vol_chart = daily_volume_chart(daily_metrics)
-        out_chart = daily_outcome_chart(daily_metrics)
-        cost_chart = daily_cost_chart(daily_metrics)
-        lat_chart = daily_latency_chart(daily_metrics)
+        out_chart = daily_outcome_chart(daily_metrics, merge_events=merge_events_df)
+        cost_chart = daily_cost_chart(daily_metrics, merge_events=merge_events_df)
+        lat_chart = daily_latency_chart(daily_metrics, merge_events=merge_events_df)
 
         row1_c1, row1_c2 = st.columns(2)
         with row1_c1:

@@ -92,7 +92,10 @@ def daily_volume_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
     )
 
 
-def daily_outcome_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
+def daily_outcome_chart(
+    daily_metrics: pd.DataFrame,
+    merge_events: pd.DataFrame | None = None,
+) -> alt.Chart:
     """Create daily outcome rates stacked area chart."""
     outcome_long = daily_metrics.melt(
         id_vars=["date"],
@@ -106,7 +109,7 @@ def daily_outcome_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         "soft_error_rate": "Soft error",
         "error_rate": "Error",
     })
-    return (
+    chart = (
         alt.Chart(outcome_long)
         .mark_area()
         .encode(
@@ -123,8 +126,31 @@ def daily_outcome_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         .properties(title="Daily outcome rates")
     )
 
+    if isinstance(merge_events, pd.DataFrame) and len(merge_events) and "date" in merge_events.columns:
+        events = merge_events.copy()
+        events["date"] = pd.to_datetime(events["date"], errors="coerce")
+        events = events.dropna(subset=["date"])
+        if len(events):
+            rule = (
+                alt.Chart(events)
+                .mark_rule(color="black", strokeDash=[6, 6], opacity=0.9, size=1.2)
+                .encode(
+                    x=alt.X("date:T", title="Date"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Merge date"),
+                        alt.Tooltip("merge_titles:N", title="Merges"),
+                    ],
+                )
+            )
+            chart = chart + rule
 
-def daily_cost_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
+    return chart
+
+
+def daily_cost_chart(
+    daily_metrics: pd.DataFrame,
+    merge_events: pd.DataFrame | None = None,
+) -> alt.Chart:
     """Create daily cost chart."""
     cost_long = daily_metrics.melt(
         id_vars=["date"],
@@ -133,7 +159,7 @@ def daily_cost_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         value_name="value",
     )
     cost_long["metric"] = cost_long["metric"].replace({"mean_cost": "Mean cost", "p95_cost": "p95 cost"})
-    return (
+    chart = (
         alt.Chart(cost_long)
         .mark_line(point=True)
         .encode(
@@ -149,8 +175,31 @@ def daily_cost_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         .properties(title="Daily cost")
     )
 
+    if isinstance(merge_events, pd.DataFrame) and len(merge_events) and "date" in merge_events.columns:
+        events = merge_events.copy()
+        events["date"] = pd.to_datetime(events["date"], errors="coerce")
+        events = events.dropna(subset=["date"])
+        if len(events):
+            rule = (
+                alt.Chart(events)
+                .mark_rule(color="white", strokeDash=[6, 6], opacity=0.9, size=1.2)
+                .encode(
+                    x=alt.X("date:T", title="Date"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Merge date"),
+                        alt.Tooltip("merge_titles:N", title="Merges"),
+                    ],
+                )
+            )
+            chart = chart + rule
 
-def daily_latency_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
+    return chart
+
+
+def daily_latency_chart(
+    daily_metrics: pd.DataFrame,
+    merge_events: pd.DataFrame | None = None,
+) -> alt.Chart:
     """Create daily latency chart."""
     lat_long = daily_metrics.melt(
         id_vars=["date"],
@@ -159,7 +208,7 @@ def daily_latency_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         value_name="value",
     )
     lat_long["metric"] = lat_long["metric"].replace({"mean_latency": "Mean latency", "p95_latency": "p95 latency"})
-    return (
+    chart = (
         alt.Chart(lat_long)
         .mark_line(point=True)
         .encode(
@@ -174,6 +223,26 @@ def daily_latency_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         )
         .properties(title="Daily latency")
     )
+
+    if isinstance(merge_events, pd.DataFrame) and len(merge_events) and "date" in merge_events.columns:
+        events = merge_events.copy()
+        events["date"] = pd.to_datetime(events["date"], errors="coerce")
+        events = events.dropna(subset=["date"])
+        if len(events):
+            rule = (
+                alt.Chart(events)
+                .mark_rule(color="white", strokeDash=[6, 6], opacity=0.9, size=1.2)
+                .encode(
+                    x=alt.X("date:T", title="Date"),
+                    tooltip=[
+                        alt.Tooltip("date:T", title="Merge date"),
+                        alt.Tooltip("merge_titles:N", title="Merges"),
+                    ],
+                )
+            )
+            chart = chart + rule
+
+    return chart
 
 
 def outcome_pie_chart(df: pd.DataFrame) -> alt.Chart:
