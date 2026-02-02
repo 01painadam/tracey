@@ -37,16 +37,14 @@ def get_gemini_model_options(api_key: str, cache_key: str = "gemini_model_option
         return (out[0], out[1], out[2])
 
     try:
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=api_key)
+        client = genai.Client(api_key=api_key)
         models: list[str] = []
-        for m in genai.list_models():
+
+        for m in client.models.list():
             name = getattr(m, "name", None)
             if not isinstance(name, str) or not name.strip():
-                continue
-            methods = getattr(m, "supported_generation_methods", None)
-            if isinstance(methods, (list, tuple)) and "generateContent" not in methods:
                 continue
             cleaned = name.replace("models/", "")
             if not cleaned.startswith("gemini-"):

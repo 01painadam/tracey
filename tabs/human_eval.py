@@ -84,11 +84,13 @@ def render(
         st.session_state.human_eval_clear_notes_next_run = False
 
     def _call_gemini(api_key: str, model_name: str, prompt: str) -> str:
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        resp = model.generate_content(prompt)
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
         return str(getattr(resp, "text", "") or "")
 
     def _criteria_key(model_name: str, criteria: str) -> str:

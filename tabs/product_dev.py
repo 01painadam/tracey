@@ -67,11 +67,13 @@ def _normalize_rows(traces: list[dict[str, Any]], limit: int = 500) -> list[dict
 
 def _call_gemini(api_key: str, model_name: str, prompt: str) -> str:
     """Call Gemini and return text response."""
-    import google.generativeai as genai
+    from google import genai
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(prompt)
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
     return str(getattr(resp, "text", "") or "")
 
 
