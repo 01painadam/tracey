@@ -453,6 +453,9 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         render_human_eval(
             base_thread_url=base_thread_url,
             gemini_api_key=gemini_api_key,
+            public_key=public_key,
+            secret_key=secret_key,
+            base_url=base_url,
         )
 
     with tabs[2]:

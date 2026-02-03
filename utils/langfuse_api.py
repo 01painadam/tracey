@@ -24,6 +24,185 @@ def get_langfuse_headers(public_key: str, secret_key: str) -> dict[str, str]:
     return {"Authorization": f"Basic {auth}"}
 
 
+def fetch_score_configs(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    page: int = 1,
+    limit: int = 100,
+    http_timeout_s: float = 30,
+) -> list[dict[str, Any]]:
+    url = f"{base_url.rstrip('/')}/api/public/score-configs"
+    params = {"page": int(page), "limit": int(limit)}
+    r = requests.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("data") if isinstance(data, dict) else None
+    if isinstance(rows, list):
+        return [x for x in rows if isinstance(x, dict)]
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+
+def list_annotation_queues(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    page: int = 1,
+    limit: int = 100,
+    http_timeout_s: float = 30,
+) -> list[dict[str, Any]]:
+    url = f"{base_url.rstrip('/')}/api/public/annotation-queues"
+    params = {"page": int(page), "limit": int(limit)}
+    r = requests.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("data") if isinstance(data, dict) else None
+    if isinstance(rows, list):
+        return [x for x in rows if isinstance(x, dict)]
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+
+def create_annotation_queue(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    name: str,
+    score_config_ids: list[str],
+    description: str | None = None,
+    http_timeout_s: float = 30,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/public/annotation-queues"
+    payload: dict[str, Any] = {
+        "name": str(name),
+        "scoreConfigIds": [str(x) for x in score_config_ids if str(x).strip()],
+    }
+    if description is not None:
+        payload["description"] = str(description)
+    r = requests.post(url, headers=headers, json=payload, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    out = r.json()
+    return out if isinstance(out, dict) else {}
+
+
+def create_annotation_queue_item(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    queue_id: str,
+    object_id: str,
+    object_type: str = "TRACE",
+    status: str | None = None,
+    http_timeout_s: float = 30,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/public/annotation-queues/{queue_id}/items"
+    payload: dict[str, Any] = {
+        "objectId": str(object_id),
+        "objectType": str(object_type),
+    }
+    if status is not None:
+        payload["status"] = str(status)
+    r = requests.post(url, headers=headers, json=payload, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    out = r.json()
+    return out if isinstance(out, dict) else {}
+
+
+def update_annotation_queue_item(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    queue_id: str,
+    item_id: str,
+    status: str,
+    http_timeout_s: float = 30,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/public/annotation-queues/{queue_id}/items/{item_id}"
+    payload: dict[str, Any] = {"status": str(status)}
+    r = requests.patch(url, headers=headers, json=payload, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    out = r.json()
+    return out if isinstance(out, dict) else {}
+
+
+def fetch_projects(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    http_timeout_s: float = 30,
+) -> list[dict[str, Any]]:
+    url = f"{base_url.rstrip('/')}/api/public/projects"
+    r = requests.get(url, headers=headers, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("data") if isinstance(data, dict) else None
+    if isinstance(rows, list):
+        return [x for x in rows if isinstance(x, dict)]
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+
+def create_score(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    trace_id: str,
+    name: str,
+    value: str | float | int,
+    environment: str | None = None,
+    comment: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    config_id: str | None = None,
+    queue_id: str | None = None,
+    score_id: str | None = None,
+    http_timeout_s: float = 30,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/api/public/scores"
+    payload: dict[str, Any] = {
+        "name": str(name),
+        "value": value,
+        "traceId": str(trace_id),
+    }
+    if score_id is not None and str(score_id).strip():
+        payload["id"] = str(score_id)
+    if environment is not None and str(environment).strip():
+        payload["environment"] = str(environment)
+    if comment is not None:
+        payload["comment"] = str(comment)
+    if metadata is not None:
+        payload["metadata"] = metadata
+    if config_id is not None and str(config_id).strip():
+        payload["configId"] = str(config_id)
+    if queue_id is not None and str(queue_id).strip():
+        payload["queueId"] = str(queue_id)
+        payload["source"] = "ANNOTATION"
+    else:
+        payload["source"] = "API"
+
+    r = requests.post(url, headers=headers, json=payload, timeout=float(http_timeout_s))
+    r.raise_for_status()
+    out = r.json()
+    return out if isinstance(out, dict) else {}
+
+
+def delete_score(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    score_id: str,
+    http_timeout_s: float = 30,
+) -> None:
+    url = f"{base_url.rstrip('/')}/api/public/scores/{score_id}"
+    r = requests.delete(url, headers=headers, timeout=float(http_timeout_s))
+    if r.status_code in (200, 204, 404):
+        return
+    r.raise_for_status()
+
+
 def _default_cache_dir() -> Path:
     return Path(__file__).resolve().parent / "__pycache__" / "langfuse_cache"
 

@@ -1,12 +1,23 @@
 """Human evaluation sampling tab."""
 
+import json
 import random
 import time
+import hashlib
 from typing import Any
 
 import streamlit as st
 
 from utils import (
+    get_langfuse_headers,
+    fetch_score_configs,
+    list_annotation_queues,
+    create_annotation_queue,
+    create_annotation_queue_item,
+    update_annotation_queue_item,
+    fetch_projects,
+    create_score,
+    delete_score,
     normalize_trace_format,
     first_human_prompt,
     final_ai_message,
@@ -58,6 +69,9 @@ def _format_elapsed(started_at: float | None) -> str:
 def render(
     base_thread_url: str,
     gemini_api_key: str,
+    public_key: str,
+    secret_key: str,
+    base_url: str,
 ) -> None:
     """Render the Human Eval Sampling tab."""
     st.subheader("🧪 Human Evaluation")
@@ -77,7 +91,25 @@ def render(
         "human_eval_filter_criteria": "",
         "human_eval_filter_model": "",
         "human_eval_filter_cache": {},
+        "human_eval_queue_id": "",
+        "human_eval_queue_name": "",
+        "human_eval_score_config_id": "",
+        "human_eval_score_config_name": "",
+        "human_eval_score_config_description": "",
+        "human_eval_active_queue_id": "",
+        "human_eval_active_score_config_id": "",
+        "human_eval_active_score_config_name": "",
+        "human_eval_active_score_config_description": "",
+        "human_eval_queue_items": {},
+        "human_eval_langfuse_scores": {},
+        "human_eval_project_id": "",
     })
+
+    headers = get_langfuse_headers(public_key, secret_key) if public_key and secret_key else {}
+
+    def _deterministic_score_id(trace_id: str, config_id: str, evaluator: str) -> str:
+        raw = f"{trace_id}||{config_id}||{evaluator}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:32]
 
     if bool(st.session_state.get("human_eval_clear_notes_next_run")):
         st.session_state["_eval_notes"] = ""
@@ -101,7 +133,7 @@ def render(
     if not traces:
         st.info(
             "This tab helps you create a **random sample** from the currently loaded traces and record quick human eval "
-            "annotations (pass/fail/unclear + notes).\n\n"
+            "annotations (pass/fail/unsure + notes).\n\n"
             "Use the sidebar **🚀 Fetch traces** button first, then click **Sample from fetched traces** here."
         )
         return
@@ -110,11 +142,135 @@ def render(
 
     if not samples:
         st.markdown("#### Set up your evaluation session")
+
+        if not (public_key and secret_key and base_url):
+            st.info("Add Langfuse credentials in the sidebar to enable queue-based scoring.")
+            score_configs = []
+            queues = []
+        else:
+            try:
+                score_configs = fetch_score_configs(base_url=base_url, headers=headers)
+            except Exception:
+                score_configs = []
+            try:
+                queues = list_annotation_queues(base_url=base_url, headers=headers)
+            except Exception:
+                queues = []
+
+        score_cfg_options = {
+            str(c.get("id")): {
+                "name": str(c.get("name") or ""),
+                "description": str(c.get("description") or ""),
+            }
+            for c in score_configs
+            if isinstance(c, dict) and c.get("id") and c.get("name")
+        }
+        score_cfg_ids = list(score_cfg_options.keys())
+        score_cfg_display = {k: v.get("name", k) for k, v in score_cfg_options.items()}
+
+        selected_cfg_id = st.selectbox(
+            "Langfuse score config",
+            options=score_cfg_ids,
+            format_func=lambda cid: score_cfg_display.get(cid, cid),
+            index=score_cfg_ids.index(st.session_state.human_eval_score_config_id)
+            if st.session_state.human_eval_score_config_id in score_cfg_ids
+            else 0,
+            disabled=not bool(score_cfg_ids),
+            key="human_eval_score_config_id",
+            help="Required. Select the Langfuse score config that defines the categorical values (pass/fail/unsure) and rubric.",
+        )
+
+        selected_cfg = score_cfg_options.get(str(selected_cfg_id), {})
+        st.session_state.human_eval_score_config_name = str(selected_cfg.get("name") or "")
+        st.session_state.human_eval_score_config_description = str(selected_cfg.get("description") or "")
+
+        queue_options: dict[str, str] = {
+            "": "Select a queue...",
+        }
+        for q in queues:
+            if not isinstance(q, dict):
+                continue
+            qid = str(q.get("id") or "").strip()
+            qname = str(q.get("name") or "").strip()
+            if qid and qname:
+                queue_options[qid] = qname
+
+        create_new = st.checkbox(
+            "Create a new annotation queue",
+            value=False,
+            key="human_eval_create_new_queue",
+            help="If checked, create a new queue in Langfuse tied to the selected score config.",
+        )
+        if create_new:
+            new_name = st.text_input(
+                "New queue name",
+                value=str(st.session_state.get("human_eval_new_queue_name") or ""),
+                key="human_eval_new_queue_name",
+                help="Required. A short name to identify this queue in Langfuse.",
+            )
+            new_desc = st.text_area(
+                "New queue description (optional)",
+                value=str(st.session_state.get("human_eval_new_queue_desc") or ""),
+                key="human_eval_new_queue_desc",
+                height=80,
+                help="Optional. Use this to describe what evaluators should do.",
+            )
+            if st.button(
+                "Create queue",
+                type="secondary",
+                disabled=not bool(new_name.strip() and selected_cfg_id),
+                help="Creates the queue in Langfuse and selects it for this session.",
+            ):
+                try:
+                    q = create_annotation_queue(
+                        base_url=base_url,
+                        headers=headers,
+                        name=new_name.strip(),
+                        description=new_desc.strip() if new_desc.strip() else None,
+                        score_config_ids=[str(selected_cfg_id)],
+                    )
+                    qid = str(q.get("id") or "").strip()
+                    if qid:
+                        st.session_state.human_eval_queue_id = qid
+                        st.session_state.human_eval_queue_name = str(q.get("name") or "")
+                        st.success("Queue created.")
+                        st.rerun()
+                except Exception as e:
+                    st.warning(f"Failed to create queue: {e}")
+        else:
+            existing_ids = list(queue_options.keys())
+            selected_queue_id = st.selectbox(
+                "Langfuse annotation queue",
+                options=existing_ids,
+                format_func=lambda qid: queue_options.get(qid, qid),
+                index=existing_ids.index(st.session_state.human_eval_queue_id)
+                if st.session_state.human_eval_queue_id in existing_ids
+                else 0,
+                key="human_eval_queue_id",
+                help="Required. Choose the queue where sampled traces will be added for annotation.",
+            )
+            st.session_state.human_eval_queue_name = queue_options.get(str(selected_queue_id), "")
+
+        if public_key and secret_key and base_url:
+            try:
+                projects = fetch_projects(base_url=base_url, headers=headers)
+                if isinstance(projects, list) and projects:
+                    pid = str(projects[0].get("id") or "").strip() if isinstance(projects[0], dict) else ""
+                    if pid:
+                        st.session_state.human_eval_project_id = pid
+            except Exception:
+                pass
+
+            if st.session_state.human_eval_queue_id and st.session_state.human_eval_project_id:
+                queue_url = f"{base_url.rstrip('/')}/project/{st.session_state.human_eval_project_id}/annotation-queues/{st.session_state.human_eval_queue_id}"
+                st.link_button("Open queue in Langfuse", queue_url)
+
         evaluator_name = st.text_input(
             "Your name (for CSV filename)",
             value=st.session_state.human_eval_evaluator_name,
             placeholder="e.g. Alice",
             key="_eval_name_input",
+            help="Used in exported CSV filename and appended to Langfuse score comments (e.g. '-Alice').",
         )
         col_size, col_seed = st.columns(2)
         with col_size:
@@ -241,8 +397,6 @@ def render(
 
                         pending = []
 
-                    import json
-
                     for t in to_consider:
                         n = normalize_trace_format(t)
                         tid = str(n.get("id") or "")
@@ -322,8 +476,18 @@ def render(
                 else:
                     st.info("No matched examples to preview yet.")
 
-        if st.button("🎲 Sample from fetched traces", type="primary"):
-            st.session_state.human_eval_evaluator_name = evaluator_name.strip()
+        langfuse_ready = bool(
+            (public_key and secret_key and base_url)
+            and str(st.session_state.get("human_eval_score_config_id") or "").strip()
+            and str(st.session_state.get("human_eval_queue_id") or "").strip()
+        )
+
+        if not langfuse_ready:
+            st.warning("Select a score config and annotation queue (or create one) to enable sampling.")
+
+        if st.button("🎲 Sample from fetched traces", type="primary", disabled=not langfuse_ready):
+            if evaluator_name.strip():
+                st.session_state.human_eval_evaluator_name = evaluator_name.strip()
             normed: list[dict[str, Any]] = []
 
             criteria = str(st.session_state.get("human_eval_filter_criteria", "") or "")
@@ -386,6 +550,46 @@ def render(
             st.session_state.human_eval_completed = False
             st.session_state.human_eval_streak = 0
             st.session_state.human_eval_showed_balloons = False
+
+            st.session_state.human_eval_queue_items = {}
+            st.session_state.human_eval_langfuse_scores = {}
+
+            queue_id = str(st.session_state.get("human_eval_queue_id") or "").strip()
+            if queue_id and public_key and secret_key and base_url:
+                st.session_state.human_eval_active_queue_id = queue_id
+                st.session_state.human_eval_active_score_config_id = str(
+                    st.session_state.get("human_eval_score_config_id") or ""
+                ).strip()
+                st.session_state.human_eval_active_score_config_name = str(
+                    st.session_state.get("human_eval_score_config_name") or ""
+                ).strip()
+                st.session_state.human_eval_active_score_config_description = str(
+                    st.session_state.get("human_eval_score_config_description") or ""
+                ).strip()
+
+                selected_samples = st.session_state.human_eval_samples
+                trace_ids = [str(r.get("trace_id") or "").strip() for r in selected_samples if r.get("trace_id")]
+                trace_ids = [t for t in trace_ids if t]
+                if trace_ids:
+                    prog = st.progress(0.0, text="Adding sampled traces to annotation queue...")
+                    added: dict[str, str] = {}
+                    for i, tid in enumerate(trace_ids):
+                        try:
+                            item = create_annotation_queue_item(
+                                base_url=base_url,
+                                headers=headers,
+                                queue_id=queue_id,
+                                object_id=tid,
+                                object_type="TRACE",
+                            )
+                            item_id = str(item.get("id") or "").strip()
+                            if item_id:
+                                added[tid] = item_id
+                        except Exception:
+                            pass
+                        prog.progress((i + 1) / max(1, len(trace_ids)))
+                    prog.empty()
+                    st.session_state.human_eval_queue_items = added
             st.rerun()
 
         st.info("Click the button above to create a shuffled sample from the shared traces.")
@@ -553,12 +757,154 @@ Thank you for your contribution! 🙏
             else:
                 st.button("⛓️‍💥 No link", disabled=True, width="stretch")
 
+        rubric = str(st.session_state.get("human_eval_active_score_config_description") or "").strip() or str(
+            st.session_state.get("human_eval_score_config_description") or ""
+        ).strip()
+        if rubric:
+            st.markdown(rubric)
+
         notes = st.text_area(
             label="📝 Add notes _(optional)_",
             height=200,
             key="_eval_notes",
             placeholder="Explain your choice of rating..."
         )
+
+        def _save_and_advance_with_langfuse(
+            row: dict,
+            rating: str,
+            notes: str,
+            idx: int,
+            samples: list,
+        ) -> None:
+            tid = str(row.get("trace_id") or "")
+            existing_notes = st.session_state.human_eval_annotations.get(tid, {}).get("notes", "")
+            st.session_state.human_eval_annotations[tid] = {
+                "trace_id": row.get("trace_id"),
+                "timestamp": row.get("timestamp"),
+                "session_id": row.get("session_id"),
+                "environment": row.get("environment"),
+                "rating": rating,
+                "notes": notes or existing_notes,
+                "prompt": row.get("prompt"),
+                "answer": row.get("answer"),
+            }
+
+            queue_id = str(st.session_state.get("human_eval_queue_id") or "").strip() or str(
+                st.session_state.get("human_eval_active_queue_id") or ""
+            ).strip()
+            config_id = str(st.session_state.get("human_eval_score_config_id") or "").strip() or str(
+                st.session_state.get("human_eval_active_score_config_id") or ""
+            ).strip()
+            config_name = str(st.session_state.get("human_eval_score_config_name") or "").strip() or str(
+                st.session_state.get("human_eval_active_score_config_name") or ""
+            ).strip()
+            evaluator = str(st.session_state.get("human_eval_evaluator_name") or "").strip() or "anon"
+            score_name = config_name or "human_eval"
+
+            score_value = {"pass": "pass", "fail": "fail", "unsure": "unsure"}.get(
+                str(rating),
+                str(rating),
+            )
+
+            formatted_comment = ""
+            if str(notes or "").strip():
+                formatted_comment = str(notes).rstrip()
+                if evaluator.strip():
+                    formatted_comment = f"{formatted_comment}\n-{evaluator.strip()}"
+
+            has_langfuse = bool(public_key and secret_key and base_url)
+            if not has_langfuse:
+                st.session_state.human_eval_streak += 1
+                st.session_state.human_eval_clear_notes_next_run = True
+                st.session_state.human_eval_current_trace_id = ""
+
+                if idx < len(samples) - 1:
+                    st.session_state.human_eval_index = idx + 1
+
+                st.toast(f"Rated: {rating} ✓")
+                st.rerun()
+
+            # Best-effort: upsert score (create; if conflicts, delete old and recreate)
+            try:
+                score_id = _deterministic_score_id(tid, config_id or score_name, evaluator)
+                created = create_score(
+                    base_url=base_url,
+                    headers=headers,
+                    trace_id=tid,
+                    name=score_name,
+                    value=score_value,
+                    environment=str(row.get("environment") or "") or None,
+                    comment=formatted_comment or None,
+                    metadata={"evaluator": evaluator},
+                    config_id=config_id or None,
+                    queue_id=queue_id or None,
+                    score_id=score_id,
+                )
+                new_score_id = str(created.get("id") or "").strip()
+                if new_score_id:
+                    existing_scores = st.session_state.get("human_eval_langfuse_scores", {})
+                    if not isinstance(existing_scores, dict):
+                        existing_scores = {}
+                    existing_scores[tid] = new_score_id
+                    st.session_state.human_eval_langfuse_scores = existing_scores
+            except Exception:
+                try:
+                    existing_scores = st.session_state.get("human_eval_langfuse_scores", {})
+                    old_score_id = existing_scores.get(tid) if isinstance(existing_scores, dict) else None
+                    if isinstance(old_score_id, str) and old_score_id.strip():
+                        delete_score(base_url=base_url, headers=headers, score_id=old_score_id)
+                except Exception:
+                    pass
+                try:
+                    score_id = _deterministic_score_id(tid, config_id or score_name, evaluator)
+                    created = create_score(
+                        base_url=base_url,
+                        headers=headers,
+                        trace_id=tid,
+                        name=score_name,
+                        value=score_value,
+                        environment=str(row.get("environment") or "") or None,
+                        comment=formatted_comment or None,
+                        metadata={"evaluator": evaluator},
+                        config_id=config_id or None,
+                        queue_id=queue_id or None,
+                        score_id=score_id,
+                    )
+                    new_score_id = str(created.get("id") or "").strip()
+                    if new_score_id:
+                        existing_scores = st.session_state.get("human_eval_langfuse_scores", {})
+                        if not isinstance(existing_scores, dict):
+                            existing_scores = {}
+                        existing_scores[tid] = new_score_id
+                        st.session_state.human_eval_langfuse_scores = existing_scores
+                except Exception:
+                    pass
+
+            # Best-effort: mark queue item completed
+            try:
+                item_map = st.session_state.get("human_eval_queue_items", {})
+                item_id = item_map.get(tid) if isinstance(item_map, dict) else None
+                if queue_id and isinstance(item_id, str) and item_id.strip():
+                    update_annotation_queue_item(
+                        base_url=base_url,
+                        headers=headers,
+                        queue_id=queue_id,
+                        item_id=item_id,
+                        status="COMPLETED",
+                    )
+            except Exception:
+                pass
+
+            st.session_state.human_eval_streak += 1
+            st.session_state.human_eval_clear_notes_next_run = True
+            st.session_state.human_eval_current_trace_id = ""
+
+            if idx < len(samples) - 1:
+                st.session_state.human_eval_index = idx + 1
+
+            st.toast(f"Rated: {rating} ✓")
+            st.rerun()
 
         st.markdown("**✅ Submit a rating for this response**", help="NOTE: You can only rate a response once.")
         r1, r2, r3 = st.columns(3)
@@ -570,7 +916,7 @@ Thank you for your contribution! 🙏
                 width="stretch",
                 help="Use **Pass** when the response is correct, relevant, and would satisfy the user without major issues.",
             ):
-                _save_and_advance(row, "pass", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(row, "pass", str(notes or ""), idx, samples)
         with r2:
             if st.button(
                 "👎 Fail",
@@ -579,16 +925,16 @@ Thank you for your contribution! 🙏
                 width="stretch",
                 help="Use **Fail** when the response is wrong, missing key information, unsafe, or clearly not usable.",
             ):
-                _save_and_advance(row, "fail", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(row, "fail", str(notes or ""), idx, samples)
         with r3:
             if st.button(
-                "🤔 Unclear",
-                key="btn_unclear",
+                "🤔 Unsure",
+                key="btn_unsure",
                 type="primary",
                 width="stretch",
-                help="Use **Unclear** when you can't confidently decide Pass/Fail (e.g. missing context, ambiguous question, needs domain verification).",
+                help="Use **Unsure** when you can't confidently decide Pass/Fail (e.g. missing context, ambiguous question, needs domain verification).",
             ):
-                _save_and_advance(row, "unclear", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(row, "unsure", str(notes or ""), idx, samples)
 
         st.download_button(
             label="⬇️ Download CSV",
