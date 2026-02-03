@@ -1003,7 +1003,7 @@ def render(
             st.session_state.get("human_eval_queue_description") or ""
         ).strip()
         if rubric:
-            with st.expander("Rubric reminder", expanded=False):
+            with st.expander("❓ Rubric reminder", expanded=False):
                 st.markdown(rubric)
 
         notes = st.text_area(

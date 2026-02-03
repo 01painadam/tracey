@@ -21,18 +21,17 @@ st.title("💬🧠📎 Tracey. `v0.1`")
 st.markdown(
     """
 **Tracey** is a trace analysis and human evaluation tool for Global Nature Watch.
-Tracey allows you quickly pull and explore traces from Langfuse.
-_Ta, Trace!_
+Quickly pull and explore traces from Langfuse. _Ta, Trace!_
 
-### ℹ️ What this tool does
+### 🛠️ What's in the toolkit?
 
-| Page | Description |
+| Tool | Description |
 |------|-------------|
 | 📊 **Analytics** | Overview charts, metrics, and reports |
 | ✅ **Human Eval** | Sample and rate traces for quality evaluation |
 | 🧠 **Product Intelligence** | AI-powered insights and pattern discovery |
 | 🔎 **Trace Explorer** | Browse and filter individual traces |
-| � **Conversation Browser** | View full conversation threads |
+| 🔗 **Conversation Browser** | View full conversation threads |
 
 ### Current Session
 
