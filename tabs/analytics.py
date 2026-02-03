@@ -72,7 +72,11 @@ def render(
 
     start_date_label = _format_report_date(start_date)
     end_date_label = _format_report_date(end_date)
-    st.subheader("Trace stats for selected date range")
+    st.subheader("📊 Trace Analytics")
+    st.caption(
+        "Explore aggregate volume, outcomes, latency, cost, languages, tool usage, and errors across the currently loaded traces. "
+        "Use filters and exports to share a report with others."
+    )
 
     st.markdown(
         """

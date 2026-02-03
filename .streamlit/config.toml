@@ -1,0 +1,9 @@
+[client]
+# Ensure multipage navigation is visible in the sidebar
+showSidebarNavigation = true
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

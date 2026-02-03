@@ -46,6 +46,13 @@ from utils.llm_helpers import (
     truncate_text,
     parse_json_any,
     parse_json_dict,
+    call_gemini,
+)
+from utils.shared_ui import (
+    check_authentication,
+    render_sidebar,
+    get_app_config,
+    configure_page,
 )
 from utils.charts import (
     daily_volume_chart,
@@ -109,6 +116,7 @@ __all__ = [
     "truncate_text",
     "parse_json_any",
     "parse_json_dict",
+    "call_gemini",
     # Charts
     "daily_volume_chart",
     "daily_outcome_chart",
@@ -125,4 +133,9 @@ __all__ = [
     "reasoning_tokens_histogram",
     "tool_flow_sankey_data",
     "tool_flow_arc_chart",
+    # Shared UI
+    "check_authentication",
+    "render_sidebar",
+    "get_app_config",
+    "configure_page",
 ]

@@ -101,7 +101,10 @@ def _trace_label(t: dict[str, Any]) -> str:
 
 def render(base_thread_url: str) -> None:
     st.subheader("🔎 Trace Explorer")
-    st.caption("Inspect raw traces exactly as returned by Langfuse (before normalization).")
+    st.caption(
+        "Inspect individual traces in detail: view the current user turn, assistant output, tool calls, metadata, and raw JSON. "
+        "Useful for debugging odd outputs, latency/cost spikes, and tool failures."
+    )
 
     traces: list[dict[str, Any]] = st.session_state.get("stats_traces", [])
     if not traces:

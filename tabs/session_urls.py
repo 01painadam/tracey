@@ -17,7 +17,11 @@ def render(
     base_thread_url: str,
 ) -> None:
     """Render the Session URLs tab."""
-    st.subheader("Session URLs")
+    st.subheader("🔗 Conversation Browser")
+    st.caption(
+        "Generate a deduplicated list of conversation-thread links from the currently loaded traces, then export them to CSV "
+        "for review or sharing."
+    )
 
     traces: list[dict[str, Any]] = st.session_state.get("stats_traces", [])
 

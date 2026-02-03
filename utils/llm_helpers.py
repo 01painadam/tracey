@@ -98,3 +98,24 @@ def parse_json_dict(txt: str) -> dict[str, Any]:
         return {"raw": parsed}
     except Exception:
         return {"raw": cleaned}
+
+
+def call_gemini(api_key: str, model_name: str, prompt: str) -> str:
+    """Call Gemini API and return text response.
+    
+    Args:
+        api_key: Google API key for Gemini
+        model_name: Name of the Gemini model to use
+        prompt: The prompt to send to the model
+        
+    Returns:
+        The text response from the model, or empty string on error
+    """
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+    )
+    return str(getattr(resp, "text", "") or "")

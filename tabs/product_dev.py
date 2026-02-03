@@ -24,6 +24,7 @@ from utils import (
     truncate_text,
     parse_json_any,
     parse_json_dict,
+    call_gemini,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,17 +65,6 @@ def _normalize_rows(traces: list[dict[str, Any]], limit: int = 500) -> list[dict
             break
     return out
 
-
-def _call_gemini(api_key: str, model_name: str, prompt: str) -> str:
-    """Call Gemini and return text response."""
-    from google import genai
-
-    client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-    )
-    return str(getattr(resp, "text", "") or "")
 
 
 def _render_llm_settings(
@@ -205,7 +195,7 @@ def _render_evidence_mining(
                 hypothesis=hypothesis,
                 search_text=search_text,
             )
-            resp_txt = _call_gemini(gemini_api_key, gemini_model, scoring_prompt)
+            resp_txt = call_gemini(gemini_api_key, gemini_model, scoring_prompt)
             parsed = parse_json_dict(resp_txt)
             if parsed.get("relevant") or (isinstance(parsed.get("score"), (int, float)) and parsed["score"] >= 50):
                 return {
@@ -243,7 +233,7 @@ def _render_evidence_mining(
 
                 parsed_any = None
                 try:
-                    resp_txt = _call_gemini(gemini_api_key, gemini_model, batch_prompt)
+                    resp_txt = call_gemini(gemini_api_key, gemini_model, batch_prompt)
                     parsed_any = parse_json_any(resp_txt)
                 except Exception:
                     parsed_any = None
@@ -428,7 +418,7 @@ def _render_tagging(
                 assistant_output=truncate_text(str(r.get("answer", "") or "")[:2000], int(max_chars_per_trace)),
                 criteria_keys=json.dumps(selected_criteria),
             )
-            resp_txt = _call_gemini(gemini_api_key, gemini_model, tagging_prompt)
+            resp_txt = call_gemini(gemini_api_key, gemini_model, tagging_prompt)
             parsed = parse_json_dict(resp_txt)
             tagged_row = {**r}
             for k in selected_criteria:
@@ -459,7 +449,7 @@ def _render_tagging(
 
                 parsed_any = None
                 try:
-                    resp_txt = _call_gemini(gemini_api_key, gemini_model, batch_prompt)
+                    resp_txt = call_gemini(gemini_api_key, gemini_model, batch_prompt)
                     parsed_any = parse_json_any(resp_txt)
                 except Exception:
                     parsed_any = None
@@ -590,7 +580,7 @@ def _render_gap_analysis(
         analysis_prompt = gap_prompt_template.format(traces_summary=traces_summary)
 
         try:
-            resp_txt = _call_gemini(gemini_api_key, gemini_model, analysis_prompt)
+            resp_txt = call_gemini(gemini_api_key, gemini_model, analysis_prompt)
             st.session_state.gap_report = resp_txt
             st.rerun()
         except Exception as e:
@@ -644,14 +634,18 @@ def render(
     gemini_api_key: str,
 ) -> None:
     """Render the Product Dev Mining tab."""
-    st.subheader("⛏️ Product Development Mining")
+    st.subheader("🧠 Product Intelligence")
+    st.caption(
+        "Use LLM-assisted workflows to find evidence for a hypothesis, batch-tag user prompts, and generate gap-analysis summaries "
+        "across the traces you’ve fetched."
+    )
 
     traces: list[dict[str, Any]] = st.session_state.get("stats_traces", [])
 
     if not traces:
         st.info(
             "This tab helps you **mine traces for product insights**:\n\n"
-            "- 🔍 **Evidence Mining** – Find traces supporting a product hypothesis\n"
+            "- ⛏️ **Evidence Mining** – Find traces supporting a product hypothesis\n"
             "- 🏷️ **Tagging** – Batch-tag traces with LLM-as-judge criteria\n"
             "- 📊 **Gap Analysis** – Identify user jobs, coverage, and product gaps\n\n"
             "Use the sidebar **🚀 Fetch traces** button first."

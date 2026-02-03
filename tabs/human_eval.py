@@ -31,6 +31,7 @@ from utils import (
     truncate_text,
     parse_json_any,
     chunked,
+    call_gemini,
 )
 
 
@@ -84,7 +85,11 @@ def render(
     base_url: str,
 ) -> None:
     """Render the Human Eval Sampling tab."""
-    st.subheader("🧪 Human Evaluation")
+    st.subheader("✅ Human Evaluation")
+    st.caption(
+        "Create or select an eval queue, sample traces into it, and rate responses against a score rubric. "
+        "Your ratings are written back to Langfuse so the queue reflects progress."
+    )
 
     init_session_state({
         "human_eval_annotations": {},
@@ -126,16 +131,6 @@ def render(
     if bool(st.session_state.get("human_eval_clear_notes_next_run")):
         st.session_state["_eval_notes"] = ""
         st.session_state.human_eval_clear_notes_next_run = False
-
-    def _call_gemini(api_key: str, model_name: str, prompt: str) -> str:
-        from google import genai
-
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        return str(getattr(resp, "text", "") or "")
 
     def _criteria_key(model_name: str, criteria: str) -> str:
         return f"{model_name}||{criteria.strip()}"
@@ -581,7 +576,7 @@ def render(
                                 f"{json.dumps(items, ensure_ascii=False)}\n"
                             )
 
-                            resp_txt = _call_gemini(gemini_api_key, str(model_name), llm_prompt)
+                            resp_txt = call_gemini(gemini_api_key, str(model_name), llm_prompt)
                             parsed_any = parse_json_any(resp_txt)
                             if not isinstance(parsed_any, list):
                                 parsed_any = []
