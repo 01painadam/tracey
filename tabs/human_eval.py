@@ -224,11 +224,11 @@ def render(
             if create_new:
                 queue_name_placeholder = "GNW_Eval__<rubric-shortname>__<topic>__<date>__v<version>"
                 rubric_placeholder = (
-                    "Rubric best practices:\n"
-                    "- Define what Pass/Fail/Unsure mean\n"
-                    "- Provide 2-3 examples\n"
-                    "- Call out common failure modes\n"
-                    "- Keep it short but unambiguous\n"
+                    "Rubric best practices.\n"
+                    "- Specific: state what is being judged (not “overall quality”)\n"
+                    "- Operational: describe observable criteria a rater can apply quickly. Provide examples\n"
+                    "- Bounded: state what is in scope and what is out of scope\n"
+                    "- Consistent: avoid criteria that depend on personal preference, tone, and style (unless that's explicitly the goal)\n"
                 )
                 new_name = st.text_input(
                     "Eval queue name",
@@ -238,10 +238,10 @@ def render(
                     help="Required. Use a consistent naming convention.",
                 )
                 new_desc = st.text_area(
-                    "Rubric / description",
+                    "Rubric description",
                     value=str(st.session_state.get("human_eval_new_queue_desc") or ""),
                     key="human_eval_new_queue_desc",
-                    height=140,
+                    height=300,
                     placeholder=rubric_placeholder,
                     help="Required. This becomes the queue description in Langfuse.",
                 )
@@ -1003,7 +1003,7 @@ def render(
             st.session_state.get("human_eval_queue_description") or ""
         ).strip()
         if rubric:
-            with st.expander("❓ Rubric reminder", expanded=False):
+            with st.expander("❓ Rubric reminder", expanded=False, help="See this queue's rubric for scoring"):
                 st.markdown(rubric)
 
         notes = st.text_area(
