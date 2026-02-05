@@ -94,6 +94,7 @@ def _background_langfuse_write(
     item_id: str | None,
 ) -> None:
     """Write score and update queue item in background thread (fire-and-forget)."""
+    last_err: Exception | None = None
     try:
         create_score(
             base_url=base_url,
@@ -108,11 +109,9 @@ def _background_langfuse_write(
             queue_id=queue_id,
             score_id=score_id,
         )
-    except Exception:
-        try:
-            delete_score(base_url=base_url, headers=headers, score_id=score_id)
-        except Exception:
-            pass
+        last_err = None
+    except Exception as e:
+        last_err = e
         try:
             create_score(
                 base_url=base_url,
@@ -127,8 +126,12 @@ def _background_langfuse_write(
                 queue_id=queue_id,
                 score_id=score_id,
             )
-        except Exception:
-            pass
+            last_err = None
+        except Exception as e2:
+            last_err = e2
+
+    if last_err is not None:
+        raise last_err
 
     if queue_id and item_id:
         try:
@@ -139,8 +142,8 @@ def _background_langfuse_write(
                 item_id=item_id,
                 status="COMPLETED",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            raise e
 
 
 def render(
@@ -152,6 +155,17 @@ def render(
 ) -> None:
     """Render the Human Eval Sampling tab."""
     st.subheader("✅ Human Evaluation")
+
+    pending_warning = st.session_state.get("human_eval_pending_warning")
+    if isinstance(pending_warning, str) and pending_warning.strip():
+        st.warning(pending_warning)
+        st.session_state.human_eval_pending_warning = ""
+
+    pending_toast = st.session_state.get("human_eval_pending_toast")
+    if isinstance(pending_toast, str) and pending_toast.strip():
+        st.toast(pending_toast)
+        st.session_state.human_eval_pending_toast = ""
+
     st.caption(
         "Create or select an eval queue, sample traces into it, and rate responses against a score rubric. "
         "Your ratings are written back to Langfuse so the queue reflects progress."
@@ -192,6 +206,8 @@ def render(
         "human_eval_queue_items": {},
         "human_eval_langfuse_scores": {},
         "human_eval_project_id": "",
+        "human_eval_pending_warning": "",
+        "human_eval_pending_toast": "",
     })
 
     headers = get_langfuse_headers(public_key, secret_key) if public_key and secret_key else {}
@@ -1148,18 +1164,6 @@ def render(
             samples: list,
         ) -> None:
             tid = str(row.get("trace_id") or "")
-            existing_notes = st.session_state.human_eval_annotations.get(tid, {}).get("notes", "")
-            st.session_state.human_eval_annotations[tid] = {
-                "trace_id": row.get("trace_id"),
-                "timestamp": row.get("timestamp"),
-                "session_id": row.get("session_id"),
-                "environment": row.get("environment"),
-                "rating": rating,
-                "notes": notes or existing_notes,
-                "prompt": row.get("prompt"),
-                "answer": row.get("answer"),
-            }
-
             queue_id = str(st.session_state.get("human_eval_queue_id") or "").strip() or str(
                 st.session_state.get("human_eval_active_queue_id") or ""
             ).strip()
@@ -1181,42 +1185,60 @@ def render(
             if str(notes or "").strip():
                 formatted_comment = str(notes).rstrip()
 
-            # Update local state immediately (before any API calls)
-            st.session_state.human_eval_streak += 1
+            has_langfuse = bool(public_key and secret_key and base_url)
+            langfuse_err: str | None = None
+            if has_langfuse:
+                score_id = _deterministic_score_id(tid, score_name, evaluator)
+                item_map = st.session_state.get("human_eval_queue_items", {})
+                item_id = item_map.get(tid) if isinstance(item_map, dict) else None
+
+                try:
+                    _background_langfuse_write(
+                        base_url=base_url,
+                        headers=dict(headers),
+                        tid=tid,
+                        score_name=score_name,
+                        score_value=score_value,
+                        environment=str(row.get("environment") or "") or None,
+                        formatted_comment=formatted_comment or None,
+                        evaluator=evaluator,
+                        config_id=config_id or None,
+                        queue_id=queue_id or None,
+                        score_id=score_id,
+                        item_id=item_id if isinstance(item_id, str) and item_id.strip() else None,
+                    )
+                except Exception as e:
+                    langfuse_err = str(e)
+                    st.session_state.human_eval_pending_warning = f"Langfuse score write failed: {langfuse_err}"
+
+            # Only count/store the rating if Langfuse write succeeded. Otherwise treat as a skip.
+            if langfuse_err is None:
+                existing_notes = st.session_state.human_eval_annotations.get(tid, {}).get("notes", "")
+                st.session_state.human_eval_annotations[tid] = {
+                    "trace_id": row.get("trace_id"),
+                    "timestamp": row.get("timestamp"),
+                    "session_id": row.get("session_id"),
+                    "environment": row.get("environment"),
+                    "rating": rating,
+                    "notes": notes or existing_notes,
+                    "prompt": row.get("prompt"),
+                    "answer": row.get("answer"),
+                }
+                st.session_state.human_eval_streak += 1
+            else:
+                # Failed write: do not increment streak or store rating.
+                st.session_state.human_eval_streak = 0
+
             st.session_state.human_eval_clear_notes_next_run = True
             st.session_state.human_eval_current_trace_id = ""
 
             if idx < len(samples) - 1:
                 st.session_state.human_eval_index = idx + 1
 
-            # Fire-and-forget: Langfuse writes in background thread
-            has_langfuse = bool(public_key and secret_key and base_url)
-            if has_langfuse:
-                score_id = _deterministic_score_id(tid, score_name, evaluator)
-                item_map = st.session_state.get("human_eval_queue_items", {})
-                item_id = item_map.get(tid) if isinstance(item_map, dict) else None
-
-                thread = threading.Thread(
-                    target=_background_langfuse_write,
-                    kwargs={
-                        "base_url": base_url,
-                        "headers": dict(headers),
-                        "tid": tid,
-                        "score_name": score_name,
-                        "score_value": score_value,
-                        "environment": str(row.get("environment") or "") or None,
-                        "formatted_comment": formatted_comment or None,
-                        "evaluator": evaluator,
-                        "config_id": config_id or None,
-                        "queue_id": queue_id or None,
-                        "score_id": score_id,
-                        "item_id": item_id if isinstance(item_id, str) and item_id.strip() else None,
-                    },
-                    daemon=True,
-                )
-                thread.start()
-
-            st.toast(f"Rated: {rating} ✓")
+            toast_msg = f"Rated: {rating} ✓"
+            if langfuse_err:
+                toast_msg = f"Rated: {rating} (Langfuse write failed: {langfuse_err[:200]})"
+            st.session_state.human_eval_pending_toast = toast_msg
             st.rerun()
 
         st.markdown("**✅ Score this response**", help="NOTE: You can only rate a response once.")

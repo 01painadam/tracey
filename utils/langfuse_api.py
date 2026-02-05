@@ -236,12 +236,59 @@ def create_score(
     payload["source"] = "API"
 
     r = requests.post(url, headers=headers, json=payload, timeout=float(http_timeout_s))
-    r.raise_for_status()
-    out = r.json()
+    if int(getattr(r, "status_code", 0) or 0) >= 400:
+        details: str | None = None
+        try:
+            err = r.json()
+            if isinstance(err, dict):
+                details = str(
+                    err.get("message")
+                    or err.get("error")
+                    or err.get("detail")
+                    or err.get("errors")
+                    or ""
+                ).strip() or None
+            elif err is not None:
+                details = str(err).strip() or None
+        except Exception:
+            details = None
 
-    # TODO check response status and confirm payload.id == out.id. If not, raise an exception and surface the error message in the UI
+        if not details:
+            try:
+                details = str(getattr(r, "text", "") or "").strip() or None
+            except Exception:
+                details = None
 
-    return out if isinstance(out, dict) else {}
+        prefix = f"Langfuse create_score failed (HTTP {int(r.status_code)})"
+        if details:
+            raise Exception(f"{prefix}: {details[:1200]}")
+        raise Exception(prefix)
+
+    try:
+        out = r.json()
+    except Exception as e:
+        raw = ""
+        try:
+            raw = str(getattr(r, "text", "") or "")
+        except Exception:
+            raw = ""
+        raise Exception(f"Langfuse create_score returned invalid JSON: {raw[:1200]}") from e
+
+    if not isinstance(out, dict):
+        raise Exception(f"Langfuse create_score returned unexpected payload type: {type(out).__name__}")
+
+    expected_id = payload.get("id")
+    if isinstance(expected_id, str) and expected_id.strip():
+        returned_id = out.get("id")
+        if expected_id != returned_id:
+            raise Exception(f"Expected score id {expected_id} but got {returned_id}")
+
+    if not out.get("id"):
+        raise Exception(
+            f"Langfuse create_score succeeded but response missing id: {json.dumps(out, default=str)[:1200]}"
+        )
+
+    return out
 
 
 def delete_score(
