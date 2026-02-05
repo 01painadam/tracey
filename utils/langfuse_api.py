@@ -233,6 +233,7 @@ def create_score(
         payload["configId"] = str(config_id)
     if queue_id is not None and str(queue_id).strip():
         payload["queueId"] = str(queue_id)
+        payload["metadata"]['queue_id'] = str(queue_id)
     payload["source"] = "API"
 
     r = requests.post(url, headers=headers, json=payload, timeout=float(http_timeout_s))
@@ -303,6 +304,59 @@ def delete_score(
     if r.status_code in (200, 204, 404):
         return
     r.raise_for_status()
+
+
+def fetch_scores_by_queue(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    queue_id: str,
+    page: int = 1,
+    limit: int = 100,
+    http_timeout_s: float = 30,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Fetch scores filtered by annotation queueId using the v2 API.
+    
+    Returns a tuple of (scores_list, metadata_dict).
+    Metadata includes totalCount and pagination info.
+    """
+    url = f"{base_url.rstrip('/')}/api/public/v2/scores"
+    all_scores: list[dict[str, Any]] = []
+    meta: dict[str, Any] = {"totalCount": 0, "page": page, "limit": limit}
+    
+    current_page = page
+    while True:
+        params: dict[str, Any] = {
+            "fields": ['score', 'trace'],
+            "page": int(current_page),
+            "limit": int(limit),
+        }
+        r = requests.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
+        r.raise_for_status()
+        data = r.json()
+       
+        if isinstance(data, dict):
+            meta["totalCount"] = data.get("meta", {}).get("totalCount", 0)
+            rows = data.get("data", [])
+        else:
+            rows = data if isinstance(data, list) else []
+        
+        if not rows:
+            break
+            
+        for row in rows:
+            if isinstance(row, dict):
+                all_scores.append(row)
+        
+        if len(rows) < limit:
+            break
+            
+        current_page += 1
+    
+    meta["fetchedCount"] = len(all_scores)
+    # TODO remove
+    print(all_scores, '\n\n') 
+    return all_scores, meta
 
 
 def _default_cache_dir() -> Path:

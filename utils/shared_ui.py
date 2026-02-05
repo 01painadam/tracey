@@ -78,7 +78,7 @@ def render_sidebar() -> dict[str, Any]:
     
     with st.sidebar:
         if app_password and st.session_state.get("app_authenticated"):
-            if st.button("Log out", use_container_width=True):
+            if st.button("Log out", width="stretch"):
                 st.session_state.app_authenticated = False
                 st.rerun()
 
@@ -173,7 +173,7 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
 
         c_fetch, c_dl = st.columns(2)
         with c_fetch:
-            fetch_clicked = st.button("🚀 Fetch traces", type="primary", use_container_width=True)
+            fetch_clicked = st.button("🚀 Fetch traces", type="primary", width="stretch")
         with c_dl:
             traces_for_dl = st.session_state.get("stats_traces", [])
             if traces_for_dl:
@@ -203,10 +203,10 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                     file_name="gnw_traces_raw.csv",
                     mime="text/csv",
                     key="raw_csv_download",
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
-                st.button("⬇️ Download csv", disabled=True, use_container_width=True)
+                st.button("⬇️ Download csv", disabled=True, width="stretch")
 
         fetch_status = st.empty()
 
