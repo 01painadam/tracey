@@ -75,6 +75,18 @@ def render_sidebar() -> dict[str, Any]:
     """Render the shared sidebar and return configuration dict."""
     maybe_load_dotenv()
     app_password = os.getenv("APP_PASSWORD", "")
+
+    default_end = date.today()
+    default_start = default_end - timedelta(days=7)
+    init_session_state(
+        {
+            "environment": "production",
+            "date_preset": "Last week",
+            "start_date": default_start,
+            "end_date": default_end,
+            "use_date_filter": True,
+        }
+    )
     
     with st.sidebar:
         if app_password and st.session_state.get("app_authenticated"):
@@ -96,7 +108,7 @@ def render_sidebar() -> dict[str, Any]:
             options=["production"],
             index=0,
             label_visibility="collapsed",
-            key="environment_select",
+            key="environment",
         )
 
         envs: list[str] | None
@@ -109,13 +121,18 @@ def render_sidebar() -> dict[str, Any]:
         date_preset = st.selectbox(
             "Date preset",
             options=["Custom", "Last day", "Last 3 days", "Last week", "Last month", "All"],
-            index=1,
+            index=max(
+                0,
+                ["Custom", "Last day", "Last 3 days", "Last week", "Last month", "All"].index(
+                    str(st.session_state.get("date_preset") or "Last week")
+                )
+                if str(st.session_state.get("date_preset") or "Last week")
+                in ["Custom", "Last day", "Last 3 days", "Last week", "Last month", "All"]
+                else 3,
+            ),
             label_visibility="collapsed",
-            key="date_preset_select",
+            key="date_preset",
         )
-
-        default_end = date.today()
-        default_start = default_end - timedelta(days=7)
 
         use_date_filter = date_preset != "All"
         if date_preset == "Last day":
@@ -135,12 +152,26 @@ def render_sidebar() -> dict[str, Any]:
             end_date = default_end
             st.caption(f"Using {start_date} to {end_date}")
         elif date_preset == "Custom":
-            start_date = st.date_input("Start date", value=default_start)
-            end_date = st.date_input("End date", value=default_end)
+            start_date = st.date_input(
+                "Start date",
+                value=st.session_state.get("start_date") or default_start,
+                key="start_date",
+            )
+            end_date = st.date_input(
+                "End date",
+                value=st.session_state.get("end_date") or default_end,
+                key="end_date",
+            )
         else:
             start_date = date(2025, 9, 17)  # Launch date
             end_date = default_end
             st.caption(f"Using {start_date} to {end_date}")
+
+        # Persist derived dates when preset is not Custom
+        if date_preset != "Custom":
+            st.session_state.start_date = start_date
+            st.session_state.end_date = end_date
+        st.session_state.use_date_filter = use_date_filter
 
         # Initialize traces in session state
         if "stats_traces" not in st.session_state:
