@@ -32,7 +32,8 @@ Quickly pull and explore traces from Langfuse. _Ta, Trace!_
 | 📈 **Eval Insights** | A simple dashboard of human evaluation results |
 | 🧠 **Product Intelligence** | AI-powered insights and pattern discovery |
 | 🔎 **Trace Explorer** | Browse and filter individual traces |
-| 🔗 **Conversation Browser** | View full conversation threads |
+| � **Prompt Intelligence** | Keyword & bigram trends, intent/topic classification, Gemini-powered discovery |
+| �🔗 **Conversation Browser** | View full conversation threads |
 
 ### Current Session
 

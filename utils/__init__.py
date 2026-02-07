@@ -55,6 +55,16 @@ from utils.shared_ui import (
     get_app_config,
     configure_page,
 )
+from utils.prompt_analysis import (
+    classify_prompt_intent,
+    extract_prompt_topics,
+    extract_geographic_entities,
+    extract_temporal_references,
+    extract_bigrams,
+    top_bigrams,
+    detect_anti_patterns,
+    analyse_prompts_bulk,
+)
 from utils.charts import (
     daily_volume_chart,
     daily_outcome_chart,
@@ -135,6 +145,15 @@ __all__ = [
     "reasoning_tokens_histogram",
     "tool_flow_sankey_data",
     "tool_flow_arc_chart",
+    # Prompt analysis
+    "classify_prompt_intent",
+    "extract_prompt_topics",
+    "extract_geographic_entities",
+    "extract_temporal_references",
+    "extract_bigrams",
+    "top_bigrams",
+    "detect_anti_patterns",
+    "analyse_prompts_bulk",
     # Shared UI
     "check_authentication",
     "render_sidebar",
