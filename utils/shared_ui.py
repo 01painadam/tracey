@@ -317,43 +317,29 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         st.session_state.langfuse_base_url = base_url
         st.session_state.gemini_api_key = gemini_api_key
         st.session_state.base_thread_url = base_thread_url
-        st.session_state.environment = environment
         st.session_state.envs = envs
-        st.session_state.start_date = start_date
-        st.session_state.end_date = end_date
+        # NOTE: Do not assign to keys that are bound to widgets (environment/date_preset/start_date/end_date)
+        # after the widget is instantiated. Streamlit manages these keys.
         st.session_state.use_date_filter = use_date_filter
 
-        # Handle fetch
-        if fetch_clicked:
-            _handle_fetch(
-                public_key=public_key,
-                secret_key=secret_key,
-                base_url=base_url,
-                start_date=start_date,
-                end_date=end_date,
-                envs=envs,
-                stats_page_limit=int(stats_page_limit),
-                stats_page_size=int(stats_page_size),
-                stats_max_traces=int(stats_max_traces),
-                stats_http_timeout_s=float(stats_http_timeout_s),
-                stats_parallel_workers=int(stats_parallel_workers),
-                fetch_status=fetch_status,
-            )
+    # Handle fetch (outside the sidebar layout, but still within this function)
+    if fetch_clicked:
+        _handle_fetch(
+            public_key=public_key,
+            secret_key=secret_key,
+            base_url=base_url,
+            start_date=start_date,
+            end_date=end_date,
+            envs=envs,
+            stats_page_limit=int(stats_page_limit),
+            stats_page_size=int(stats_page_size),
+            stats_max_traces=int(stats_max_traces),
+            stats_http_timeout_s=float(stats_http_timeout_s),
+            stats_parallel_workers=int(stats_parallel_workers),
+            fetch_status=fetch_status,
+        )
 
-    return {
-        "public_key": public_key,
-        "secret_key": secret_key,
-        "base_url": base_url,
-        "gemini_api_key": gemini_api_key,
-        "base_thread_url": base_thread_url,
-        "environment": environment,
-        "envs": envs,
-        "start_date": start_date,
-        "end_date": end_date,
-        "use_date_filter": use_date_filter,
-        "stats_page_limit": stats_page_limit,
-        "stats_max_traces": stats_max_traces,
-    }
+    return get_app_config()
 
 
 def _handle_fetch(
