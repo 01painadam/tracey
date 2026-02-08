@@ -461,6 +461,7 @@ def fetch_traces_window(
     debug_out: dict[str, Any] | None = None,
     use_disk_cache: bool = True,
     cache_dir: str | None = None,
+    progress_callback: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch traces from Langfuse within a time window with pagination."""
     url = f"{base_url.rstrip('/')}/api/public/traces"
@@ -625,6 +626,12 @@ def fetch_traces_window(
             rows.append(it)
             if len(rows) >= max_traces:
                 break
+
+        if callable(progress_callback):
+            try:
+                progress_callback(page=page, rows_so_far=len(rows), page_limit=page_limit)
+            except Exception:
+                pass
 
         if len(batch) < limit:
             break
