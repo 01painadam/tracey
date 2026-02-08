@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import time as time_mod
 from pathlib import Path
 from typing import Any
@@ -417,6 +418,29 @@ def fetch_scores_by_queue(
 
 def _default_cache_dir() -> Path:
     return Path(__file__).resolve().parent / "__pycache__" / "langfuse_cache"
+
+
+def drop_trace_pulls_cache(*, cache_dir: str | None = None) -> int:
+    cache_root = Path(cache_dir) if isinstance(cache_dir, str) and cache_dir.strip() else _default_cache_dir()
+    try:
+        if not cache_root.exists():
+            return 0
+        deleted = 0
+        for p in cache_root.glob("traces_*.json"):
+            try:
+                if p.is_file():
+                    p.unlink()
+                    deleted += 1
+            except Exception:
+                continue
+        try:
+            if cache_root.exists() and not any(cache_root.iterdir()):
+                shutil.rmtree(cache_root, ignore_errors=True)
+        except Exception:
+            pass
+        return deleted
+    except Exception:
+        return 0
 
 
 def _cache_path(prefix: str, payload: dict[str, Any], cache_dir: Path) -> Path:

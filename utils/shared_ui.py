@@ -2,13 +2,14 @@
 
 import os
 import hmac
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import streamlit as st
 
 from utils.data_helpers import maybe_load_dotenv, iso_utc, csv_bytes_any, init_session_state
-from utils.langfuse_api import fetch_traces_window, get_langfuse_headers
+from utils.langfuse_api import fetch_traces_window, get_langfuse_headers, drop_trace_pulls_cache
 from utils.trace_parsing import (
     normalize_trace_format,
     first_human_prompt,
@@ -92,6 +93,7 @@ def render_sidebar() -> dict[str, Any]:
             "start_date": default_start,
             "end_date": default_end,
             "use_date_filter": True,
+            "confirm_drop_trace_pulls_cache": False,
         }
     )
     
@@ -246,6 +248,26 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             else:
                 st.button("⬇️ Download csv", disabled=True, width="stretch")
 
+        drop_cache_status = st.empty()
+        if st.session_state.get("confirm_drop_trace_pulls_cache"):
+            c_drop1, c_drop2 = st.columns(2)
+            with c_drop1:
+                if st.button("🗑️ Confirm drop cache", width="stretch"):
+                    deleted = drop_trace_pulls_cache()
+                    st.session_state.confirm_drop_trace_pulls_cache = False
+                    st.session_state.stats_traces = []
+                    st.session_state.pop("fetch_debug", None)
+                    drop_cache_status.success(f"Deleted {deleted} cached trace pull file(s)")
+                    st.rerun()
+            with c_drop2:
+                if st.button("Cancel", width="stretch"):
+                    st.session_state.confirm_drop_trace_pulls_cache = False
+                    st.rerun()
+        else:
+            if st.button("🧹 Drop trace pull cache", width="stretch"):
+                st.session_state.confirm_drop_trace_pulls_cache = True
+                st.rerun()
+
         fetch_status = st.empty()
 
         with st.expander("🔎 Debug Langfuse call", expanded=False):
@@ -381,6 +403,7 @@ def _handle_fetch(
         stats_page_size=stats_page_size,
         stats_max_traces=stats_max_traces,
         stats_http_timeout_s=stats_http_timeout_s,
+        stats_parallel_workers=stats_parallel_workers,
         fetch_status=fetch_status,
     )
 
@@ -398,23 +421,28 @@ def _fetch_paged(
     stats_page_size: int,
     stats_max_traces: int,
     stats_http_timeout_s: float,
+    stats_parallel_workers: int,
     fetch_status: Any,
 ) -> list[dict[str, Any]]:
-    """Fetch traces by paginating through pages for the full date range."""
-    from_iso = iso_utc(datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc))
-    to_iso = iso_utc(datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc))
+    """Fetch traces.
 
-    with fetch_status.status("Fetching traces...", expanded=True) as status:
-        fetch_debug: dict[str, Any] = {}
+    - If the requested range is a single day: fetch that window and paginate sequentially.
+    - Otherwise: split into 1-day chunks and fetch those chunks in parallel.
+    """
 
-        def _on_page(*, page: int, rows_so_far: int, page_limit: int) -> None:
-            status.update(label=f"Page {page}/{page_limit} — {rows_so_far} traces so far")
+    is_single_day = start_date == end_date
+    fetch_debug: dict[str, Any] = {}
 
-        traces = fetch_traces_window(
+    def _fetch_one_day(*, day: date) -> tuple[date, list[dict[str, Any]], dict[str, Any]]:
+        day_from_iso = iso_utc(datetime.combine(day, time.min).replace(tzinfo=timezone.utc))
+        day_to_iso = iso_utc(datetime.combine(day, time.max).replace(tzinfo=timezone.utc))
+        day_debug: dict[str, Any] = {}
+
+        rows = fetch_traces_window(
             base_url=base_url,
             headers=headers,
-            from_iso=from_iso,
-            to_iso=to_iso,
+            from_iso=day_from_iso,
+            to_iso=day_to_iso,
             envs=envs,
             page_size=stats_page_size,
             page_limit=stats_page_limit,
@@ -422,10 +450,94 @@ def _fetch_paged(
             retry=2,
             backoff=0.5,
             http_timeout_s=stats_http_timeout_s,
-            debug_out=fetch_debug,
-            progress_callback=_on_page,
+            debug_out=day_debug,
+            progress_callback=None,
         )
-        status.update(label=f"Fetched {len(traces)} traces", state="complete")
+        return day, rows, day_debug
+
+    with fetch_status.status("Fetching traces...", expanded=True) as status:
+        if is_single_day:
+            from_iso = iso_utc(datetime.combine(start_date, time.min).replace(tzinfo=timezone.utc))
+            to_iso = iso_utc(datetime.combine(end_date, time.max).replace(tzinfo=timezone.utc))
+
+            def _on_page(*, page: int, rows_so_far: int, page_limit: int) -> None:
+                status.update(label=f"Page {page}/{page_limit} — {rows_so_far} traces so far")
+
+            traces = fetch_traces_window(
+                base_url=base_url,
+                headers=headers,
+                from_iso=from_iso,
+                to_iso=to_iso,
+                envs=envs,
+                page_size=stats_page_size,
+                page_limit=stats_page_limit,
+                max_traces=stats_max_traces,
+                retry=2,
+                backoff=0.5,
+                http_timeout_s=stats_http_timeout_s,
+                debug_out=fetch_debug,
+                progress_callback=_on_page,
+            )
+            status.update(label=f"Fetched {len(traces)} traces", state="complete")
+            st.session_state.fetch_debug = fetch_debug
+            return traces
+
+        # Multi-day: fetch each day in parallel.
+        days: list[date] = []
+        d = start_date
+        while d <= end_date:
+            days.append(d)
+            d = d + timedelta(days=1)
+
+        max_workers = int(stats_parallel_workers) if int(stats_parallel_workers) > 0 else 1
+        max_workers = min(5, max_workers)
+        status.update(label=f"Fetching {len(days)} day(s) with {max_workers} worker(s)...")
+
+        results: list[tuple[date, list[dict[str, Any]], dict[str, Any]]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {pool.submit(_fetch_one_day, day=day): day for day in days}
+            done_count = 0
+            for fut in as_completed(future_map):
+                day = future_map[fut]
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    results.append((day, [], {"error": str(e)}))
+                done_count += 1
+                status.update(label=f"Fetched {done_count}/{len(days)} day(s)...")
+
+        # Sort by day then merge.
+        results.sort(key=lambda x: x[0])
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        chunks_debug: list[dict[str, Any]] = []
+        for day, rows, dbg in results:
+            chunks_debug.append({"day": str(day), "count": len(rows), "debug": dbg})
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                _id = r.get("id")
+                if isinstance(_id, str) and _id:
+                    if _id in seen:
+                        continue
+                    seen.add(_id)
+                merged.append(r)
+                if len(merged) >= int(stats_max_traces):
+                    break
+            if len(merged) >= int(stats_max_traces):
+                break
+
+        fetch_debug.update(
+            {
+                "mode": "parallel_daily_chunks",
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "days": len(days),
+                "workers": max_workers,
+                "chunks": chunks_debug,
+            }
+        )
+        status.update(label=f"Fetched {len(merged)} traces", state="complete")
 
     st.session_state.fetch_debug = fetch_debug
-    return traces
+    return merged
