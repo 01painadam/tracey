@@ -93,6 +93,11 @@ def final_ai_message(row: dict[str, Any]) -> str:
     return ""
 
 
+def trace_has_ai_message(row: dict[str, Any]) -> bool:
+    msgs = (((row.get("output") or {}).get("messages")) or [])
+    return any(isinstance(m, dict) and m.get("type") == "ai" for m in msgs)
+
+
 def looks_like_error_answer(text: str) -> bool:
     """Check if a response text looks like an error message."""
     t = (text or "").strip().lower()
@@ -114,9 +119,6 @@ def looks_like_error_answer(text: str) -> bool:
 
 def trace_used_tools(row: dict[str, Any]) -> bool:
     """Check if a trace used any tools."""
-    obs = row.get("observations")
-    if isinstance(obs, list) and obs:
-        return True
     out_msgs = (((row.get("output") or {}).get("messages")) or [])
     return any(isinstance(m, dict) and m.get("type") == "tool" for m in out_msgs)
 
@@ -124,7 +126,7 @@ def trace_used_tools(row: dict[str, Any]) -> bool:
 def classify_outcome(row: dict[str, Any], answer: str) -> str:
     """Classify the outcome of a trace based on answer content and tool usage."""
     if not answer.strip():
-        return "ERROR"
+        return "ERROR" if trace_has_ai_message(row) else "EMPTY"
     if looks_like_error_answer(answer):
         return "SOFT_ERROR"
     if not trace_used_tools(row):

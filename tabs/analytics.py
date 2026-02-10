@@ -291,8 +291,9 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         defer_rate = float((df["outcome"] == "DEFER").mean())
         soft_error_rate = float((df["outcome"] == "SOFT_ERROR").mean())
         error_rate = float((df["outcome"] == "ERROR").mean())
+        empty_rate = float((df["outcome"] == "EMPTY").mean())
     else:
-        success_rate = defer_rate = soft_error_rate = error_rate = 0.0
+        success_rate = defer_rate = soft_error_rate = error_rate = empty_rate = 0.0
 
     cost_s = df["total_cost"].dropna() if "total_cost" in df.columns else pd.Series(dtype=float)
     lat_s = df["latency_seconds"].dropna() if "latency_seconds" in df.columns else pd.Series(dtype=float)
@@ -447,6 +448,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 • Defer rate: {defer_rate:.1%}
 • Soft error rate: {soft_error_rate:.1%}
 • Error rate: {error_rate:.1%}
+• Empty rate: {empty_rate:.1%}
 
 **Performance**
 • Mean cost: ${mean_cost:.4f}
@@ -483,7 +485,8 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             {"Section": "Outcomes", "Metric": "Success rate", "Value": f"{success_rate:.1%}", "Description": "% of traces that returned a valid answer"},
             {"Section": "Outcomes", "Metric": "Defer rate", "Value": f"{defer_rate:.1%}", "Description": "% of traces classified as DEFER (final answer is non-empty/non-error, but the trace shows no tool usage)"},
             {"Section": "Outcomes", "Metric": "Soft error rate", "Value": f"{soft_error_rate:.1%}", "Description": "% of traces classified as SOFT_ERROR (final answer text looks like an error/apology via heuristic matching)"},
-            {"Section": "Outcomes", "Metric": "Error rate", "Value": f"{error_rate:.1%}", "Description": "% of traces classified as ERROR (empty final answer)"},
+            {"Section": "Outcomes", "Metric": "Error rate", "Value": f"{error_rate:.1%}", "Description": "% of traces classified as ERROR (trace has an AI message, but the final extracted answer is empty)"},
+            {"Section": "Outcomes", "Metric": "Empty rate", "Value": f"{empty_rate:.1%}", "Description": "% of traces classified as EMPTY (no AI answer message found in output)"},
             {"Section": "Performance", "Metric": "Mean cost", "Value": f"${mean_cost:.4f}", "Description": "Average LLM cost per trace"},
             {"Section": "Performance", "Metric": "Median cost", "Value": f"${median_cost:.4f}", "Description": "Middle value of cost distribution (less sensitive to outliers)"},
             {"Section": "Performance", "Metric": "p95 cost", "Value": f"${p95_cost:.4f}", "Description": "95th percentile cost (only 5% of traces cost more)"},
@@ -648,6 +651,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                 defer_rate=("outcome", lambda x: float((x == "DEFER").mean())),
                 soft_error_rate=("outcome", lambda x: float((x == "SOFT_ERROR").mean())),
                 error_rate=("outcome", lambda x: float((x == "ERROR").mean())),
+                empty_rate=("outcome", lambda x: float((x == "EMPTY").mean())),
                 mean_cost=("total_cost", lambda x: float(pd.to_numeric(x, errors="coerce").dropna().mean()) if len(pd.to_numeric(x, errors="coerce").dropna()) else 0.0),
                 p95_cost=("total_cost", lambda x: _q(x, 0.95)),
                 mean_latency=("latency_seconds", lambda x: float(pd.to_numeric(x, errors="coerce").dropna().mean()) if len(pd.to_numeric(x, errors="coerce").dropna()) else 0.0),
@@ -660,7 +664,13 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         st.markdown("### Daily trends", help="Track how key metrics change over time. Look for anomalies, regressions, or improvements day-over-day.")
 
         vol_chart = daily_volume_chart(daily_metrics)
-        out_chart = daily_outcome_chart(daily_metrics)
+        out_chart = daily_outcome_chart(daily_metrics, outcome_order=[
+            "Success",
+            "Soft error",
+            "Defer",
+            "Error (Empty)",
+            "Error",
+        ])
         cost_chart = daily_cost_chart(daily_metrics)
         lat_chart = daily_latency_chart(daily_metrics)
 
@@ -674,7 +684,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                 help=(
                     "Daily mix of outcomes as rates. Outcome rules: ANSWER = non-empty answer + tool usage; "
                     "DEFER = non-empty/non-error answer but no tool usage; SOFT_ERROR = answer text looks like an error via heuristics; "
-                    "ERROR = empty answer."
+                    "ERROR = trace has an AI message but the final extracted answer is empty; EMPTY = no AI message found."
                 ),
             )
             st.altair_chart(out_chart, width="stretch")
@@ -1360,7 +1370,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             help="Compare internal tool/API failures with errors visible in the final answer. Internal errors may be masked by agent recovery.",
         )
         internal_error_count = int(df["has_internal_error"].sum())
-        user_visible_error_count = int((df["outcome"].isin(["ERROR", "SOFT_ERROR"])).sum())
+        user_visible_error_count = int((df["outcome"].isin(["ERROR", "EMPTY", "SOFT_ERROR"])).sum())
         total_traces = len(df)
 
         # Traces with internal error that still succeeded (agent recovered)
@@ -1391,13 +1401,13 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         )
 
         both_internal_and_user_visible = int(
-            ((df["has_internal_error"]) & (df["outcome"].isin(["ERROR", "SOFT_ERROR"]))).sum()
+            ((df["has_internal_error"]) & (df["outcome"].isin(["ERROR", "EMPTY", "SOFT_ERROR"]))).sum()
         )
         internal_only = int(internal_error_count - both_internal_and_user_visible)
         user_visible_only = int(user_visible_error_count - both_internal_and_user_visible)
         no_errors = int(
             (
-                (~df["has_internal_error"]) & (~df["outcome"].isin(["ERROR", "SOFT_ERROR"]))
+                (~df["has_internal_error"]) & (~df["outcome"].isin(["ERROR", "EMPTY", "SOFT_ERROR"]))
             ).sum()
         )
 

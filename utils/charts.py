@@ -2,6 +2,7 @@
 
 import altair as alt
 import pandas as pd
+from typing import Mapping, Sequence
 
 
 _LANG_NAME_MAP: dict[str, str] = {
@@ -92,27 +93,51 @@ def daily_volume_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
     )
 
 
-def daily_outcome_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
+def daily_outcome_chart(
+    daily_metrics: pd.DataFrame,
+    *,
+    outcome_order: Sequence[str] | None = None,
+    outcome_colors: Mapping[str, str] | None = None,
+) -> alt.Chart:
     """Create daily outcome rates stacked area chart."""
     outcome_long = daily_metrics.melt(
         id_vars=["date"],
-        value_vars=["success_rate", "defer_rate", "soft_error_rate", "error_rate"],
+        value_vars=["error_rate", "empty_rate", "defer_rate", "soft_error_rate", "success_rate"],
         var_name="metric",
         value_name="value",
     )
     outcome_long["metric"] = outcome_long["metric"].replace({
-        "success_rate": "Success",
-        "defer_rate": "Defer",
-        "soft_error_rate": "Soft error",
         "error_rate": "Error",
+        "empty_rate": "Error (Empty)",
+        "soft_error_rate": "Soft error",
+        "defer_rate": "Defer",
+        "success_rate": "Success",
     })
+
+    order = list(outcome_order) if outcome_order is not None else [
+        "Success",
+        "Soft error",
+        "Defer",
+        "Error (Empty)",
+        "Error",
+    ]
+
+    default_colors: dict[str, str] = {
+        "Success": "#0068C9",
+        "Soft error": "#83C9FF",
+        "Defer": "#D5DAE5",
+        "Error (Empty)": "#FFABAB",
+        "Error": "#FF2B2B",
+    }
+    color_map = {**default_colors, **(dict(outcome_colors) if outcome_colors is not None else {})}
+    color_scale = alt.Scale(domain=order, range=[color_map.get(k, "#999999") for k in order])
     return (
         alt.Chart(outcome_long)
         .mark_area()
         .encode(
             x=alt.X("date:T", title="Date"),
             y=alt.Y("value:Q", title="Rate", stack="normalize", axis=alt.Axis(format="%")),
-            color=alt.Color("metric:N", title="Outcome", sort=["Success", "Defer", "Soft error", "Error"]),
+            color=alt.Color("metric:N", title="Outcome", sort=order, scale=color_scale),
             order=alt.Order("metric:N", sort="descending"),
             tooltip=[
                 alt.Tooltip("date:T", title="Date"),
@@ -375,7 +400,9 @@ def success_rate_bar_chart(
                 alt.Tooltip("traces:Q", title="Traces", format=","),
                 alt.Tooltip("success_rate:Q", title="Success rate", format=".1%"),
                 alt.Tooltip("defer_rate:Q", title="Defer rate", format=".1%"),
+                alt.Tooltip("soft_error_rate:Q", title="Soft error rate", format=".1%"),
                 alt.Tooltip("error_rate:Q", title="Error rate", format=".1%"),
+                alt.Tooltip("empty_rate:Q", title="Empty rate", format=".1%"),
             ],
         )
         .properties(title=f"Success rate by {title.lower()}")

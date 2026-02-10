@@ -419,7 +419,7 @@ def _fetch_chunked(
     current_start = start_date
     idx = 1
     while current_start <= end_date:
-        current_end = min(current_start + timedelta(days=4), end_date)
+        current_end = min(current_start + timedelta(days=2), end_date)
         chunks.append((idx, current_start, current_end))
         current_start = current_end + timedelta(days=1)
         idx += 1
