@@ -665,11 +665,11 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 
         vol_chart = daily_volume_chart(daily_metrics)
         out_chart = daily_outcome_chart(daily_metrics, outcome_order=[
-            "Success",
-            "Soft error",
-            "Defer",
-            "Error (Empty)",
             "Error",
+            "Error (Empty)",
+            "Defer",
+            "Soft error",
+            "Success",
         ])
         cost_chart = daily_cost_chart(daily_metrics)
         lat_chart = daily_latency_chart(daily_metrics)

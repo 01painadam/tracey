@@ -109,8 +109,8 @@ def daily_outcome_chart(
     outcome_long["metric"] = outcome_long["metric"].replace({
         "error_rate": "Error",
         "empty_rate": "Error (Empty)",
-        "soft_error_rate": "Soft error",
         "defer_rate": "Defer",
+        "soft_error_rate": "Soft error",
         "success_rate": "Success",
     })
 
@@ -138,7 +138,6 @@ def daily_outcome_chart(
             x=alt.X("date:T", title="Date"),
             y=alt.Y("value:Q", title="Rate", stack="normalize", axis=alt.Axis(format="%")),
             color=alt.Color("metric:N", title="Outcome", sort=order, scale=color_scale),
-            order=alt.Order("metric:N", sort="descending"),
             tooltip=[
                 alt.Tooltip("date:T", title="Date"),
                 alt.Tooltip("metric:N", title="Outcome"),
