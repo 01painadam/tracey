@@ -89,6 +89,7 @@ def _background_langfuse_write(
     environment: str | None,
     formatted_comment: str | None,
     evaluator: str,
+    flagged_for_removal: bool,
     config_id: str | None,
     queue_id: str | None,
     score_id: str,
@@ -105,7 +106,11 @@ def _background_langfuse_write(
             value=score_value,
             environment=environment,
             comment=formatted_comment,
-            metadata={"evaluator": evaluator, "source": "Tracey"},
+            metadata={
+                "evaluator": evaluator,
+                "source": "Tracey",
+                "flagged_for_removal": bool(flagged_for_removal),
+            },
             config_id=config_id,
             queue_id=queue_id,
             score_id=score_id,
@@ -122,7 +127,11 @@ def _background_langfuse_write(
                 value=score_value,
                 environment=environment,
                 comment=formatted_comment,
-                metadata={"evaluator": evaluator, "source": "Tracey"},
+                metadata={
+                    "evaluator": evaluator,
+                    "source": "Tracey",
+                    "flagged_for_removal": bool(flagged_for_removal),
+                },
                 config_id=config_id,
                 queue_id=queue_id,
                 score_id=score_id,
@@ -1217,12 +1226,12 @@ def render(
         st.progress(progress)
         stat_c1, stat_c2, stat_c3 = st.columns(3)
         with stat_c1:
-            st.metric("Done", f"{evaluated_count}/{total_count}")
+            st.metric("✅ Done", f"{evaluated_count}/{total_count}")
         with stat_c2:
-            st.metric("⏱️", _format_elapsed(st.session_state.human_eval_started_at))
+            st.metric("⏱️ Time", _format_elapsed(st.session_state.human_eval_started_at))
         with stat_c3:
             streak = st.session_state.human_eval_streak
-            st.metric("🔥", streak if streak > 0 else "-")
+            st.metric("🔥 Streak", streak if streak > 0 else "-")
 
         st.caption(_get_encouragement(progress))
         
@@ -1248,21 +1257,22 @@ def render(
             st.session_state.get("human_eval_queue_description") or ""
         ).strip()
         if rubric:
-            st.caption("See this queue's rubric for scoring")
-            with st.expander("❓ Rubric reminder", expanded=False):
+            with st.expander("❓ See this queue's rubric for scoring", expanded=False):
                 st.markdown(rubric)
 
         notes = st.text_area(
-            label="📝 Add notes _(optional)_",
-            height=200,
+            label="",
+            label_visibility="collapsed",
+            height=120,
             key="_eval_notes",
-            placeholder="Explain your choice of rating..."
+            placeholder="(Optional) Add notes to explain your choice of rating..."
         )
 
         def _save_and_advance_with_langfuse(
             row: dict,
             rating: str,
             notes: str,
+            flagged_for_removal: bool,
             idx: int,
             samples: list,
         ) -> None:
@@ -1305,6 +1315,7 @@ def render(
                         environment=str(row.get("environment") or "") or None,
                         formatted_comment=formatted_comment or None,
                         evaluator=evaluator,
+                        flagged_for_removal=bool(flagged_for_removal),
                         config_id=config_id or None,
                         queue_id=queue_id or None,
                         score_id=score_id,
@@ -1324,6 +1335,7 @@ def render(
                     "environment": row.get("environment"),
                     "rating": rating,
                     "notes": notes or existing_notes,
+                    "flagged_for_removal": bool(flagged_for_removal),
                     "prompt": row.get("prompt"),
                     "answer": row.get("answer"),
                 }
@@ -1334,6 +1346,7 @@ def render(
 
             st.session_state.human_eval_clear_notes_next_run = True
             st.session_state.human_eval_current_trace_id = ""
+            st.session_state.human_eval_flagged_for_removal = False
 
             if idx < len(samples) - 1:
                 st.session_state.human_eval_index = idx + 1
@@ -1343,7 +1356,13 @@ def render(
                 toast_msg = f"Rated: {rating} (Langfuse write failed: {langfuse_err[:200]})"
             st.session_state.human_eval_pending_toast = toast_msg
             st.rerun()
-
+        
+        st.checkbox(
+            "Flag trace for removal from Eval queue",
+            key="human_eval_flagged_for_removal",
+            help="Use this when the trace is not relevant to the evaluation question / rubric and should be removed from the eval set.",
+        )
+        st.markdown("")
         st.markdown("**✅ Score this response**", help="NOTE: You can only rate a response once.")
         r1, r2, r3 = st.columns(3)
         with r1:
@@ -1354,7 +1373,14 @@ def render(
                 width="stretch",
                 help="Use **Pass** when the response is correct, relevant, and would satisfy the user without major issues.",
             ):
-                _save_and_advance_with_langfuse(row, "pass", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(
+                    row,
+                    "pass",
+                    str(notes or ""),
+                    bool(st.session_state.get("human_eval_flagged_for_removal", False)),
+                    idx,
+                    samples,
+                )
         with r2:
             if st.button(
                 "👎 Fail",
@@ -1363,7 +1389,14 @@ def render(
                 width="stretch",
                 help="Use **Fail** when the response is wrong, missing key information, unsafe, or clearly not usable.",
             ):
-                _save_and_advance_with_langfuse(row, "fail", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(
+                    row,
+                    "fail",
+                    str(notes or ""),
+                    bool(st.session_state.get("human_eval_flagged_for_removal", False)),
+                    idx,
+                    samples,
+                )
         with r3:
             if st.button(
                 "🤔 Unsure",
@@ -1372,7 +1405,14 @@ def render(
                 width="stretch",
                 help="Use **Unsure** when you can't confidently decide Pass/Fail (e.g. missing context, ambiguous question, needs domain verification).",
             ):
-                _save_and_advance_with_langfuse(row, "unsure", str(notes or ""), idx, samples)
+                _save_and_advance_with_langfuse(
+                    row,
+                    "unsure",
+                    str(notes or ""),
+                    bool(st.session_state.get("human_eval_flagged_for_removal", False)),
+                    idx,
+                    samples,
+                )
 
         st.download_button(
             label="⬇️ Download Evals (.csv)",

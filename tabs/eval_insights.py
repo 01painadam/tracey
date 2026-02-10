@@ -12,6 +12,7 @@ from utils import (
     list_annotation_queue_items,
     get_annotation_queue,
     fetch_scores_by_queue,
+    delete_score,
     init_session_state,
 )
 
@@ -162,6 +163,14 @@ def render(
     # Additional insights
     _render_temporal_insights(df_filtered)
 
+    st.divider()
+
+    _render_flagged_for_removal_section(
+        base_url=base_url,
+        headers=headers,
+        df=df_filtered,
+    )
+
 
 def _fetch_all_queue_items(
     *,
@@ -203,6 +212,7 @@ def _build_scores_dataframe(scores: list[dict[str, Any]]) -> pd.DataFrame:
             "queue_id": s.get("metadata", {}).get("queue_id", None),
             "evaluator": s.get("metadata", {}).get("evaluator", ""),
             "source": s.get("metadata", {}).get("source", None),
+            "flagged_for_removal": bool(s.get("metadata", {}).get("flagged_for_removal", False)),
             "score_config": s.get("name"),
             "value": s.get("stringValue"),
             "comment": s.get("comment"),
@@ -210,6 +220,54 @@ def _build_scores_dataframe(scores: list[dict[str, Any]]) -> pd.DataFrame:
             "data_type": s.get("dataType"),
         })
     return pd.DataFrame(rows)
+
+
+def _render_flagged_for_removal_section(
+    *,
+    base_url: str,
+    headers: dict[str, str],
+    df: pd.DataFrame,
+) -> None:
+    flagged_df = df[df.get("flagged_for_removal", False) == True] if "flagged_for_removal" in df.columns else df.iloc[0:0]
+
+    st.markdown("### 🗑️ Flagged for removal")
+    st.caption(
+        "These are evaluations where the reviewer indicated the trace was not relevant to the eval question / rubric."
+    )
+
+    if flagged_df.empty:
+        st.caption("No items have been flagged for removal.")
+        return
+
+    st.metric("Flagged items", int(len(flagged_df)))
+
+    display_cols = ["score_id", "trace_id", "evaluator", "value", "comment", "timestamp"]
+    available_cols = [c for c in display_cols if c in flagged_df.columns]
+    if available_cols:
+        with st.expander(f"View flagged items ({len(flagged_df)})", expanded=False):
+            st.dataframe(flagged_df[available_cols], hide_index=True, width="stretch")
+
+    st.markdown("#### Remove annotations")
+    st.caption("This sends a DELETE request to the annotation (score) endpoint for the selected item.")
+
+    for i, (_, row) in enumerate(flagged_df.iterrows()):
+        score_id = str(row.get("score_id") or "").strip()
+        trace_id = str(row.get("trace_id") or "").strip()
+        evaluator = str(row.get("evaluator") or "").strip()
+        label = f"Delete annotation for trace {trace_id} ({evaluator or 'unknown'})"
+
+        c1, c2 = st.columns([4, 1], gap="small")
+        with c1:
+            st.caption(label)
+        with c2:
+            btn_key = f"del_flagged_{score_id or trace_id}_{i}"
+            if st.button("Delete", key=btn_key, disabled=not bool(score_id), width="stretch"):
+                try:
+                    delete_score(base_url=base_url, headers=headers, score_id=score_id)
+                    st.success("Deleted annotation.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to delete annotation: {e}")
 
 
 def _calculate_metrics(df: pd.DataFrame, queue_items: list[dict[str, Any]]) -> dict[str, Any]:
