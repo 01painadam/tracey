@@ -124,7 +124,7 @@ def render_sidebar() -> dict[str, Any]:
         _preset_state = str(st.session_state.get("date_preset") or "Last week")
         if _preset_state not in preset_options:
             _preset_state = "Last week"
-        prev_date_preset = _preset_state
+        prev_date_preset = str(st.session_state.get("_prev_date_preset") or _preset_state)
         date_preset = st.selectbox(
             "Date preset",
             options=preset_options,
@@ -169,6 +169,8 @@ def render_sidebar() -> dict[str, Any]:
                 st.session_state.end_date = end_date
 
             st.caption(f"Using {start_date} to {end_date}")
+
+        st.session_state._prev_date_preset = date_preset
 
         st.session_state.use_date_filter = use_date_filter
 
@@ -280,19 +282,11 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                 value=500,
                 key="stats_page_limit",
             )
-            stats_http_timeout_s = st.number_input(
-                "HTTP timeout (seconds)",
-                min_value=5,
-                max_value=600,
-                value=60,
-                key="stats_http_timeout_s",
-                help="If multi-month fetches time out, increase this (e.g. 120-300s).",
-            )
             stats_page_size = st.number_input(
                 "Traces per page",
                 min_value=1,
                 max_value=100,
-                value=100,
+                value=50,
                 key="stats_page_size",
                 help="API page size (per request).",
             )
@@ -306,10 +300,18 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             stats_parallel_workers = st.number_input(
                 "Parallel workers",
                 min_value=1,
-                max_value=5,
-                value=3,
+                max_value=10,
+                value=5,
                 key="stats_parallel_workers",
-                help="Number of weekly chunks to fetch in parallel.",
+                help="Number of chunks to fetch in parallel.",
+            )
+            stats_http_timeout_s = st.number_input(
+                "HTTP timeout (seconds)",
+                min_value=5,
+                max_value=600,
+                value=180,
+                key="stats_http_timeout_s",
+                help="If multi-month fetches time out, increase this (e.g. 120-300s).",
             )
 
         base_thread_url = f"https://www.{'staging.' if environment == 'staging' else ''}globalnaturewatch.org/app/threads"
