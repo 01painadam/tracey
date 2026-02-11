@@ -89,6 +89,18 @@ def _is_machine_user_id(user_id: str) -> bool:
         return False
 
 
+def _apply_trace_filters(
+    *,
+    traces_raw: list[dict[str, Any]],
+    exclude_internal_users: bool,
+    internal_user_ids: set[str],
+) -> list[dict[str, Any]]:
+    traces = [t for t in (traces_raw or []) if not _is_machine_user_id(_trace_user_id(t))]
+    if exclude_internal_users and internal_user_ids:
+        traces = [t for t in traces if _trace_user_id(t) not in internal_user_ids]
+    return traces
+
+
 def get_app_config() -> dict[str, Any]:
     """Get current app configuration from session state."""
     return {
@@ -210,10 +222,22 @@ def render_sidebar() -> dict[str, Any]:
         # Initialize traces in session state
         if "stats_traces" not in st.session_state:
             st.session_state.stats_traces = []
+        if "stats_traces_raw" not in st.session_state:
+            st.session_state.stats_traces_raw = []
 
-         # --- Trace status ---
+        internal_user_ids = _load_internal_user_ids()
+        exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+
+        # Keep the filtered view (`stats_traces`) in sync with raw traces + filters.
+        st.session_state.stats_traces = _apply_trace_filters(
+            traces_raw=st.session_state.get("stats_traces_raw", []),
+            exclude_internal_users=exclude_internal_users,
+            internal_user_ids=internal_user_ids,
+        )
+
+        # --- Trace status ---
         traces_loaded = st.session_state.get("stats_traces", [])
-        traces_loaded_str = f"_({len(traces_loaded):,} traces loaded)_" if traces_loaded else ""
+        traces_loaded_str = f"_({len(traces_loaded):,} loaded)_" if traces_loaded else ""
 
         st.markdown(f"**📊 Traces** {traces_loaded_str}")
 
@@ -246,7 +270,7 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         with c_fetch:
             fetch_clicked = st.button("🚀 Fetch traces", type="primary", width="stretch")
         with c_dl:
-            traces_for_dl = st.session_state.get("stats_traces", [])
+            traces_for_dl = st.session_state.get("stats_traces_raw", [])
             if traces_for_dl:
                 normed_for_dl = [normalize_trace_format(t) for t in traces_for_dl]
                 out_rows = []
@@ -296,8 +320,6 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             )
             upload_clicked = st.button("Load CSV", disabled=uploaded_file is None, width="stretch")
 
-        internal_user_ids = _load_internal_user_ids()
-
         # --- User data enrichment (shown after traces are loaded) ---
         user_fetch_clicked = False
         user_invalidate_clicked = False
@@ -309,10 +331,10 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
 
             import pandas as pd
             has_user_data = isinstance(st.session_state.get("analytics_user_first_seen"), pd.DataFrame) and len(st.session_state.analytics_user_first_seen) > 0
-            users_loaded_str = f"_({len(st.session_state.analytics_user_first_seen):,} users loaded)_" if has_user_data else ""
+            users_loaded_str = f"_({len(st.session_state.analytics_user_first_seen):,} loaded)_" if has_user_data else ""
             st.markdown(f"**👥 User data** {users_loaded_str}")
 
-            exclude_internal_users = st.checkbox(
+            st.checkbox(
                 "Exclude internal users",
                 value=True,
                 key="exclude_internal_users_checkbox",
@@ -527,7 +549,16 @@ def _handle_fetch(
             fetch_status=fetch_status,
         )
 
-    traces = [t for t in traces if not _is_machine_user_id(_trace_user_id(t))]
+    traces_raw = [t for t in traces if not _is_machine_user_id(_trace_user_id(t))]
+    st.session_state.stats_traces_raw = traces_raw
+
+    internal_user_ids = _load_internal_user_ids()
+    exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+    traces = _apply_trace_filters(
+        traces_raw=traces_raw,
+        exclude_internal_users=exclude_internal_users,
+        internal_user_ids=internal_user_ids,
+    )
     st.session_state.stats_traces = traces
     st.session_state.fetch_warning = _build_fetch_warning(
         fetch_debug=st.session_state.get("fetch_debug"),
@@ -781,7 +812,16 @@ def _handle_csv_upload(uploaded_file: Any) -> None:
             }
             traces.append(trace)
 
-        st.session_state.stats_traces = traces
+        st.session_state.stats_traces_raw = traces
+
+        internal_user_ids = _load_internal_user_ids()
+        exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+        st.session_state.stats_traces = _apply_trace_filters(
+            traces_raw=traces,
+            exclude_internal_users=exclude_internal_users,
+            internal_user_ids=internal_user_ids,
+        )
+
         st.session_state.fetch_debug = {"source": "csv_upload", "rows": len(traces)}
         st.session_state.fetch_warning = {}
         st.toast(f"Loaded {len(traces):,} traces from CSV")
