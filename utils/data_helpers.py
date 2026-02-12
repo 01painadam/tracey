@@ -63,6 +63,47 @@ def csv_bytes_any(rows: list[dict[str, Any]]) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 
+def format_report_date(d: Any) -> str:
+    """Format a date or datetime with ordinal suffix (e.g. 'Mon 3rd Jun')."""
+    try:
+        if isinstance(d, datetime):
+            dt = d
+        else:
+            dt = datetime(d.year, d.month, d.day)
+        day = int(dt.day)
+        if 11 <= (day % 100) <= 13:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        return dt.strftime("%a ") + f"{day}{suffix} " + dt.strftime("%b")
+    except Exception:
+        return str(d)
+
+
+def normalize_prompt(s: Any) -> str:
+    """Normalize a prompt string for comparison: lowercase, collapse whitespace, strip trailing dots."""
+    if not isinstance(s, str):
+        return ""
+    out = " ".join(s.strip().split()).lower()
+    while out.endswith("."):
+        out = out[:-1].rstrip()
+    return out
+
+
+def safe_quantile(s: "pd.Series", q: float) -> float:
+    """Compute a quantile from a series, coercing to numeric and ignoring NaN."""
+    try:
+        import pandas as pd
+        import math
+        numeric = pd.to_numeric(s, errors="coerce").dropna()
+        if len(numeric) == 0:
+            return 0.0
+        result = float(numeric.quantile(q))
+        return 0.0 if math.isnan(result) else result
+    except Exception:
+        return 0.0
+
+
 def init_session_state(defaults: dict[str, Any]) -> None:
     """Initialize multiple session state keys with defaults if not already set.
 

@@ -2,7 +2,7 @@
 
 import altair as alt
 import pandas as pd
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 
 _LANG_NAME_MAP: dict[str, str] = {
@@ -199,18 +199,81 @@ def daily_latency_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         .properties(title="Daily latency")
     )
 
+    outcome_long["metric"] = outcome_long["metric"].replace({
+        "error_rate": "Error",
+        "empty_rate": "Error (Empty)",
+        "defer_rate": "Defer",
+        "soft_error_rate": "Soft error",
+        "success_rate": "Success",
+    })
 
+    order = list(outcome_order) if outcome_order is not None else [
+        "Success",
+        "Soft error",
+        "Defer",
+        "Error (Empty)",
+        "Error",
+    ]
+
+    default_colors: dict[str, str] = {
+        "Success": "#0068C9",
+        "Soft error": "#83C9FF",
+        "Defer": "#D5DAE5",
+        "Error (Empty)": "#FFABAB",
+        "Error": "#FF2B2B",
+    }
+    color_map = {**default_colors, **(dict(outcome_colors) if outcome_colors is not None else {})}
+    color_scale = alt.Scale(domain=order, range=[color_map.get(k, "#999999") for k in order])
+    return (
+        alt.Chart(outcome_long)
+        .mark_area()
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("value:Q", title="Rate", stack="normalize", axis=alt.Axis(format="%")),
+            color=alt.Color("metric:N", title="Outcome", sort=order, scale=color_scale),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("metric:N", title="Outcome"),
+                alt.Tooltip("value:Q", title="Rate", format=".1%"),
+            ],
+        )
+        .properties(title="Daily outcome rates")
+    )
+    
 def outcome_pie_chart(df: pd.DataFrame) -> alt.Chart:
     """Create outcome breakdown pie chart."""
     outcome_counts = df["outcome"].value_counts().reset_index()
     outcome_counts.columns = ["outcome", "count"]
-    outcome_counts["percent"] = (outcome_counts["count"] / outcome_counts["count"].sum() * 100).round(1)
+
+    # Align labels + colors with daily_outcome_chart
+    outcome_counts["outcome"] = outcome_counts["outcome"].replace(
+        {
+            "ANSWER": "Success",
+            "DEFER": "Defer",
+            "SOFT_ERROR": "Soft error",
+            "EMPTY": "Error (Empty)",
+            "ERROR": "Error",
+        }
+    )
+
+    order = ["Success", "Soft error", "Defer", "Error (Empty)", "Error"]
+    default_colors: dict[str, str] = {
+        "Success": "#0068C9",
+        "Soft error": "#83C9FF",
+        "Defer": "#D5DAE5",
+        "Error (Empty)": "#FFABAB",
+        "Error": "#FF2B2B",
+    }
+    color_scale = alt.Scale(domain=order, range=[default_colors.get(k, "#999999") for k in order])
+
+    total = max(1, int(outcome_counts["count"].sum()))
+    outcome_counts["percent"] = (outcome_counts["count"] / total * 100).round(1)
     return (
         alt.Chart(outcome_counts)
         .mark_arc(innerRadius=50)
         .encode(
             theta=alt.Theta("count:Q", title="Count"),
-            color=alt.Color("outcome:N", title="Outcome"),
+            color=alt.Color("outcome:N", title="Outcome", sort=order, scale=color_scale),
             tooltip=[
                 alt.Tooltip("outcome:N", title="Outcome"),
                 alt.Tooltip("count:Q", title="Count", format=","),
@@ -259,7 +322,7 @@ def language_bar_chart(df: pd.DataFrame, top_n: int = 15) -> alt.Chart | None:
                 alt.Tooltip("percent:Q", title="%", format=".1f"),
             ],
         )
-        .properties(title="Top prompt languages (langid)")
+        .properties(title="Top prompt languages (langid)", height=dynamic_bar_height(len(lang_df), bar_px=24, min_px=180))
     )
 
 
@@ -457,7 +520,7 @@ def tool_success_rate_chart(tool_stats_df: pd.DataFrame) -> alt.Chart | None:
                 alt.Tooltip("total:Q", title="Total calls", format=","),
             ],
         )
-        .properties(title="Tool call outcomes by tool", height=max(260, len(tool_stats_df) * 38))
+        .properties(title="Tool call outcomes by tool", height=dynamic_bar_height(len(tool_stats_df), bar_px=38, min_px=260))
     )
 
 
@@ -469,7 +532,10 @@ def tool_calls_vs_latency_chart(df: pd.DataFrame) -> alt.Chart | None:
     if not len(df) or "tool_call_count" not in df.columns or "latency_seconds" not in df.columns:
         return None
 
-    plot_df = df[["tool_call_count", "latency_seconds"]].dropna().copy()
+    plot_df = df[["tool_call_count", "latency_seconds"]].copy()
+    plot_df["tool_call_count"] = pd.to_numeric(plot_df["tool_call_count"], errors="coerce")
+    plot_df["latency_seconds"] = pd.to_numeric(plot_df["latency_seconds"], errors="coerce")
+    plot_df = plot_df.dropna(subset=["tool_call_count", "latency_seconds"]).copy()
     if "outcome" in df.columns:
         plot_df["outcome"] = df.loc[plot_df.index, "outcome"]
     else:
@@ -491,12 +557,20 @@ def tool_calls_vs_latency_chart(df: pd.DataFrame) -> alt.Chart | None:
         ],
     )
 
-    # Add trend line
-    trend = base.transform_regression(
-        "tool_call_count", "latency_seconds"
-    ).mark_line(color="gray", strokeDash=[4, 4], opacity=0.7)
+    chart: alt.Chart = points
 
-    return (points + trend).properties(
+    # Add trend line (only if regression is well-defined)
+    try:
+        if len(plot_df) >= 2 and plot_df["tool_call_count"].nunique() >= 2:
+            trend = (
+                base.transform_regression("tool_call_count", "latency_seconds")
+                .mark_line(color="gray", strokeDash=[4, 4], opacity=0.7)
+            )
+            chart = points + trend
+    except Exception:
+        chart = points
+
+    return chart.properties(
         title="Tool calls vs latency",
         height=280,
     )
@@ -580,6 +654,366 @@ def tool_flow_sankey_data(traces: list, extract_flow_fn) -> pd.DataFrame:
         for (s, t, st), c in edges.items()
     ]
     return pd.DataFrame(rows)
+
+
+def dynamic_bar_height(n_entries: int, bar_px: int = 28, min_px: int = 180, max_px: int = 800) -> int:
+    """Return a chart height that scales with the number of bar entries."""
+    return max(min_px, min(max_px, n_entries * bar_px))
+
+
+# ---------------------------------------------------------------------------
+# Prompt utilisation charts
+# ---------------------------------------------------------------------------
+
+
+def prompt_utilisation_histogram(user_day_counts: pd.DataFrame) -> alt.Chart:
+    """Histogram of prompts-per-user-per-day distribution."""
+    maxbins = 30
+    bar_size = max(6, min(28, int(600 / max(1, maxbins))))
+    return (
+        alt.Chart(user_day_counts)
+        .mark_bar(size=bar_size)
+        .encode(
+            x=alt.X(
+                "prompts:Q",
+                bin=alt.Bin(maxbins=maxbins),
+                title="Prompts per user per day",
+            ),
+            y=alt.Y("count():Q", title="User-days"),
+            tooltip=[
+                alt.Tooltip("prompts:Q", title="Prompts/user/day", bin=True),
+                alt.Tooltip("count():Q", title="User-days"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+
+def prompt_utilisation_daily_chart(
+    daily_user_prompt: pd.DataFrame,
+    prompt_limit: int = 10,
+) -> alt.LayerChart:
+    """Daily mean/median/p95 prompts per active user with a limit rule."""
+    daily_long = daily_user_prompt.melt(
+        id_vars=["date"],
+        value_vars=[
+            "mean_prompts_per_user",
+            "median_prompts_per_user",
+            "p95_prompts_per_user",
+        ],
+        var_name="metric",
+        value_name="value",
+    )
+    daily_long["metric"] = daily_long["metric"].replace(
+        {
+            "mean_prompts_per_user": "Mean",
+            "median_prompts_per_user": "Median",
+            "p95_prompts_per_user": "p95",
+        }
+    )
+
+    line = (
+        alt.Chart(daily_long)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("value:Q", title="Prompts per user"),
+            color=alt.Color("metric:N", title="Metric", sort=["Mean", "Median", "p95"]),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title="Prompts/user", format=".2f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+    limit_rule = (
+        alt.Chart(pd.DataFrame({"prompt_limit": [prompt_limit]}))
+        .mark_rule(color="#e5484d", strokeDash=[6, 4])
+        .encode(y=alt.Y("prompt_limit:Q"))
+    )
+
+    return line + limit_rule
+
+
+# ---------------------------------------------------------------------------
+# User segment charts
+# ---------------------------------------------------------------------------
+
+
+def user_segment_bar_chart(
+    daily_df: pd.DataFrame,
+    col_a: str,
+    col_b: str,
+    label_a: str,
+    label_b: str,
+    color_a: str,
+    color_b: str,
+) -> alt.Chart:
+    """Stacked bar chart for a two-category user segment over time."""
+    day_total = daily_df[col_a] + daily_df[col_b]
+    long = daily_df.assign(day_total=day_total).melt(
+        id_vars=["date", "day_total"],
+        value_vars=[col_a, col_b],
+        var_name="user_type",
+        value_name="count",
+    )
+    long["pct_of_day"] = long["count"] / long["day_total"].clip(lower=1)
+    long["user_type"] = long["user_type"].replace({col_a: label_a, col_b: label_b})
+
+    domain = [label_a, label_b]
+    scale = alt.Scale(domain=domain, range=[color_a, color_b])
+
+    n_days = int(daily_df["date"].nunique()) if "date" in daily_df.columns else 1
+    bar_size = max(3, min(20, int(420 / max(1, n_days))))
+
+    return (
+        alt.Chart(long)
+        .mark_bar(size=bar_size)
+        .encode(
+            x=alt.X("date:T", title="Date"),
+            y=alt.Y("count:Q", title="Users", stack=True),
+            color=alt.Color("user_type:N", title="User type", sort=domain, scale=scale),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("user_type:N", title="Type"),
+                alt.Tooltip("count:Q", title="Users", format=","),
+                alt.Tooltip("pct_of_day:Q", title="% of day", format=".1%"),
+            ],
+        )
+        .properties(height=220)
+    )
+
+
+def user_segment_pie_chart(
+    label_a: str,
+    label_b: str,
+    count_a: int,
+    count_b: int,
+    color_a: str,
+    color_b: str,
+) -> alt.Chart:
+    """Donut chart for a two-category user segment total."""
+    domain = [label_a, label_b]
+    scale = alt.Scale(domain=domain, range=[color_a, color_b])
+
+    pie_df = pd.DataFrame([
+        {"user_type": label_a, "count": count_a},
+        {"user_type": label_b, "count": count_b},
+    ])
+    pie_df = pie_df[pie_df["count"] > 0]
+    pie_df["percent"] = pie_df["count"] / max(1, int(pie_df["count"].sum())) * 100
+
+    return (
+        alt.Chart(pie_df)
+        .mark_arc(innerRadius=55)
+        .encode(
+            theta=alt.Theta("count:Q", title="Users"),
+            color=alt.Color("user_type:N", title="", sort=domain, scale=scale),
+            tooltip=[
+                alt.Tooltip("user_type:N", title="Type"),
+                alt.Tooltip("count:Q", title="Users", format=","),
+                alt.Tooltip("percent:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(height=220)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Starter-prompt charts
+# ---------------------------------------------------------------------------
+
+
+def starter_vs_other_pie(starter_count: int, other_count: int) -> alt.Chart:
+    """Donut chart of starter prompts vs other prompts."""
+    df = pd.DataFrame([
+        {"label": "Starter", "count": starter_count},
+        {"label": "Other", "count": other_count},
+    ])
+    df["percent"] = (df["count"] / max(1, df["count"].sum()) * 100).round(1)
+    return (
+        alt.Chart(df)
+        .mark_arc(innerRadius=55)
+        .encode(
+            theta=alt.Theta("count:Q", title="Count"),
+            color=alt.Color("label:N", title=""),
+            tooltip=[
+                alt.Tooltip("label:N", title="Type"),
+                alt.Tooltip("count:Q", title="Count", format=","),
+                alt.Tooltip("percent:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+
+def starter_breakdown_pie(breakdown_df: pd.DataFrame) -> alt.Chart:
+    """Donut chart breaking down individual starter prompt usage.
+
+    Expects df with columns: label, count.
+    """
+    df = breakdown_df.copy()
+    df["percent"] = (df["count"] / max(1, df["count"].sum()) * 100).round(1)
+    return (
+        alt.Chart(df)
+        .mark_arc(innerRadius=55)
+        .encode(
+            theta=alt.Theta("count:Q", title="Count"),
+            color=alt.Color("label:N", title=""),
+            tooltip=[
+                alt.Tooltip("label:N", title="Starter prompt"),
+                alt.Tooltip("count:Q", title="Count", format=","),
+                alt.Tooltip("percent:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(height=260)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompt-length histograms
+# ---------------------------------------------------------------------------
+
+
+def prompt_length_histogram(
+    series: pd.Series,
+    field: str,
+    title: str,
+) -> alt.Chart:
+    """Generic histogram for prompt length (chars or words)."""
+    df = pd.DataFrame({field: series})
+    return (
+        alt.Chart(df)
+        .transform_bin(
+            as_=["bin_start", "bin_end"],
+            field=field,
+            bin=alt.Bin(maxbins=60),
+        )
+        .transform_calculate(bin_width="datum.bin_end - datum.bin_start")
+        .mark_bar()
+        .encode(
+            x=alt.X("bin_start:Q", title=title, bin=alt.Bin(binned=True)),
+            x2=alt.X2("bin_end:Q"),
+            y=alt.Y("count()", title="Count"),
+            tooltip=[
+                alt.Tooltip("bin_start:Q", title="Bin start", format=","),
+                alt.Tooltip("bin_end:Q", title="Bin end", format=","),
+                alt.Tooltip("bin_width:Q", title="Bin width", format=","),
+                alt.Tooltip("count()", title="Count", format=","),
+            ],
+        )
+        .properties(height=180)
+    )
+
+
+# ---------------------------------------------------------------------------
+# AOI charts
+# ---------------------------------------------------------------------------
+
+
+def aoi_type_pie(aoi_type_df: pd.DataFrame, domain: list[str] | None = None) -> alt.Chart:
+    """Donut chart for AOI type distribution.
+
+    Expects df with columns: aoi_type, count, percent.
+    """
+    scale = alt.Scale(domain=domain, scheme="tableau10") if domain else alt.Scale(scheme="tableau10")
+    return (
+        alt.Chart(aoi_type_df)
+        .mark_arc(innerRadius=50)
+        .encode(
+            theta=alt.Theta("count:Q"),
+            color=alt.Color("aoi_type:N", title="AOI type", scale=scale),
+            tooltip=[
+                alt.Tooltip("aoi_type:N", title="AOI type"),
+                alt.Tooltip("count:Q", title="Count"),
+                alt.Tooltip("percent:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(title="AOI type", height=250)
+    )
+
+
+def aoi_name_bar(
+    aoi_name_df: pd.DataFrame,
+    aoi_type_domain: list[str] | None = None,
+) -> alt.Chart:
+    """Horizontal bar chart of top AOI names, optionally colored by AOI type.
+
+    Expects df with columns: aoi_name, count, and optionally aoi_type.
+    """
+    n = len(aoi_name_df)
+    height = dynamic_bar_height(n, bar_px=22, min_px=200, max_px=800)
+
+    enc_color: alt.Color | None = None
+    if "aoi_type" in aoi_name_df.columns and aoi_type_domain:
+        enc_color = alt.Color(
+            "aoi_type:N",
+            title="AOI type",
+            scale=alt.Scale(domain=aoi_type_domain, scheme="tableau10"),
+        )
+    elif "aoi_type" in aoi_name_df.columns:
+        enc_color = alt.Color("aoi_type:N", title="AOI type")
+
+    tooltip_fields = [
+        alt.Tooltip("aoi_name:N", title="AOI"),
+        alt.Tooltip("count:Q", title="Count", format=","),
+    ]
+    if "aoi_type" in aoi_name_df.columns:
+        tooltip_fields.insert(1, alt.Tooltip("aoi_type:N", title="AOI type"))
+
+    encoding: dict[str, Any] = {
+        "x": alt.X("count:Q", title="Count"),
+        "y": alt.Y("aoi_name:N", sort="-x", title="AOI"),
+        "tooltip": tooltip_fields,
+    }
+    if enc_color is not None:
+        encoding["color"] = enc_color
+
+    return (
+        alt.Chart(aoi_name_df)
+        .mark_bar()
+        .encode(**encoding)
+        .properties(title="AOI selection counts", height=height)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Error / flow pie charts
+# ---------------------------------------------------------------------------
+
+
+def simple_pie_chart(
+    df: pd.DataFrame,
+    label_col: str = "label",
+    count_col: str = "count",
+    *,
+    height: int = 220,
+) -> alt.Chart:
+    """Generic donut chart from a label + count DataFrame.
+
+    Adds a percent column automatically.
+    """
+    df = df.copy()
+    df = df[df[count_col] > 0]
+    total = max(1, int(df[count_col].sum()))
+    df["percent"] = (df[count_col] / total * 100).round(1)
+
+    return (
+        alt.Chart(df)
+        .mark_arc(innerRadius=55)
+        .encode(
+            theta=alt.Theta(f"{count_col}:Q", title="Count"),
+            color=alt.Color(f"{label_col}:N", title=""),
+            tooltip=[
+                alt.Tooltip(f"{label_col}:N", title=""),
+                alt.Tooltip(f"{count_col}:Q", title="Count", format=","),
+                alt.Tooltip("percent:Q", title="%", format=".1f"),
+            ],
+        )
+        .properties(height=height)
+    )
 
 
 def tool_flow_arc_chart(flow_df: pd.DataFrame) -> alt.Chart | None:

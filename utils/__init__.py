@@ -42,6 +42,9 @@ from utils.data_helpers import (
     safe_json_loads,
     csv_bytes_any,
     init_session_state,
+    format_report_date,
+    normalize_prompt,
+    safe_quantile,
 )
 from utils.llm_helpers import (
     get_gemini_model_options,
@@ -80,6 +83,17 @@ from utils.charts import (
     reasoning_tokens_histogram,
     tool_flow_sankey_data,
     tool_flow_arc_chart,
+    dynamic_bar_height,
+    prompt_utilisation_histogram,
+    prompt_utilisation_daily_chart,
+    user_segment_bar_chart,
+    user_segment_pie_chart,
+    starter_vs_other_pie,
+    starter_breakdown_pie,
+    prompt_length_histogram,
+    aoi_type_pie,
+    aoi_name_bar,
+    simple_pie_chart,
 )
 
 __all__ = [
@@ -123,6 +137,9 @@ __all__ = [
     "safe_json_loads",
     "csv_bytes_any",
     "init_session_state",
+    "format_report_date",
+    "normalize_prompt",
+    "safe_quantile",
     # LLM helpers
     "get_gemini_model_options",
     "chunked",
@@ -146,6 +163,17 @@ __all__ = [
     "reasoning_tokens_histogram",
     "tool_flow_sankey_data",
     "tool_flow_arc_chart",
+    "dynamic_bar_height",
+    "prompt_utilisation_histogram",
+    "prompt_utilisation_daily_chart",
+    "user_segment_bar_chart",
+    "user_segment_pie_chart",
+    "starter_vs_other_pie",
+    "starter_breakdown_pie",
+    "prompt_length_histogram",
+    "aoi_type_pie",
+    "aoi_name_bar",
+    "simple_pie_chart",
     # Shared UI
     "check_authentication",
     "render_sidebar",
