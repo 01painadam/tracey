@@ -104,6 +104,17 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         )
         return
 
+    raw_traces = st.session_state.get("stats_traces_raw", [])
+    n_raw = len(raw_traces)
+    n_filtered = len(traces)
+    n_excluded = n_raw - n_filtered
+    exclude_internal = bool(st.session_state.get("_shadow_exclude_internal", True))
+    if exclude_internal and n_excluded > 0:
+        st.info(
+            f"**{n_raw:,}** raw traces loaded · **{n_excluded:,}** internal-user traces excluded · "
+            f"**{n_filtered:,}** traces used for analytics"
+        )
+
     normed = [normalize_trace_format(t) for t in traces]
 
     rows: list[dict[str, Any]] = []

@@ -58,6 +58,7 @@ def check_authentication() -> bool:
     return True
 
 
+@st.cache_data(show_spinner=False)
 def _load_internal_user_ids() -> set[str]:
     try:
         path = Path(__file__).resolve().parent / "fixtures" / "internal_users.json"
@@ -128,11 +129,12 @@ def render_sidebar() -> dict[str, Any]:
     default_start = default_end - timedelta(days=7)
     init_session_state(
         {
-            "environment": "production",
-            "date_preset": "Last week",
             "start_date": default_start,
             "end_date": default_end,
             "use_date_filter": True,
+            # Shadow keys survive Streamlit widget-key cleanup between page navigations.
+            "_shadow_date_preset": "Last week",
+            "_shadow_exclude_internal": True,
         }
     )
     
@@ -166,18 +168,19 @@ def render_sidebar() -> dict[str, Any]:
             envs = [e.strip() for e in environment.split(",") if e.strip()]
 
         st.markdown("**📅 Date range**")
-        preset_options = ["Custom", "Last day", "Last 3 days", "Last week", "Last month"]
-        _preset_state = str(st.session_state.get("date_preset") or "Last week")
-        if _preset_state not in preset_options:
-            _preset_state = "Last week"
-        prev_date_preset = str(st.session_state.get("_prev_date_preset") or _preset_state)
+        preset_options = ["Custom", "Last day", "Last 3 days", "Last week", "Last 2 weeks", "Last month"]
+        _saved_preset = st.session_state.get("_shadow_date_preset", "Last week")
+        if _saved_preset not in preset_options:
+            _saved_preset = "Last week"
+        prev_date_preset = str(st.session_state.get("_prev_date_preset") or _saved_preset)
         date_preset = st.selectbox(
             "Date preset",
             options=preset_options,
-            index=preset_options.index(_preset_state),
+            index=preset_options.index(_saved_preset),
             label_visibility="collapsed",
             key="date_preset",
         )
+        st.session_state._shadow_date_preset = date_preset
 
         use_date_filter = True
         recompute_preset_dates = bool(date_preset != "Custom" and date_preset != prev_date_preset)
@@ -185,13 +188,15 @@ def render_sidebar() -> dict[str, Any]:
             start_date = st.date_input(
                 "Start date",
                 value=st.session_state.get("start_date") or default_start,
-                key="start_date",
+                key="_start_date_widget",
             )
             end_date = st.date_input(
                 "End date",
                 value=st.session_state.get("end_date") or default_end,
-                key="end_date",
+                key="_end_date_widget",
             )
+            st.session_state.start_date = start_date
+            st.session_state.end_date = end_date
         else:
             if (not recompute_preset_dates) and isinstance(st.session_state.get("start_date"), date) and isinstance(
                 st.session_state.get("end_date"), date
@@ -207,6 +212,9 @@ def render_sidebar() -> dict[str, Any]:
                     end_date = default_end
                 elif date_preset == "Last week":
                     start_date = default_end - timedelta(days=7)
+                    end_date = default_end
+                elif date_preset == "Last 2 weeks":
+                    start_date = default_end - timedelta(days=14)
                     end_date = default_end
                 else:
                     start_date = default_end - timedelta(days=30)
@@ -226,17 +234,21 @@ def render_sidebar() -> dict[str, Any]:
             st.session_state.stats_traces_raw = []
 
         internal_user_ids = _load_internal_user_ids()
-        exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+        exclude_internal = bool(st.session_state.get("_shadow_exclude_internal", True))
 
-        # Keep the filtered view (`stats_traces`) in sync with raw traces + filters.
-        st.session_state.stats_traces = _apply_trace_filters(
-            traces_raw=st.session_state.get("stats_traces_raw", []),
-            exclude_internal_users=exclude_internal_users,
-            internal_user_ids=internal_user_ids,
-        )
+        # Re-derive the filtered view only when inputs change.
+        _filter_key = (len(st.session_state.get("stats_traces_raw", [])), exclude_internal)
+        if st.session_state.get("_trace_filter_key") != _filter_key:
+            st.session_state.stats_traces = _apply_trace_filters(
+                traces_raw=st.session_state.get("stats_traces_raw", []),
+                exclude_internal_users=exclude_internal,
+                internal_user_ids=internal_user_ids,
+            )
+            st.session_state._trace_filter_key = _filter_key
 
-        # --- Trace status ---
-        traces_loaded = st.session_state.get("stats_traces", [])
+        # --- Trace status (based on raw traces so conditional sections stay stable) ---
+        traces_loaded = st.session_state.get("stats_traces_raw", [])
+        has_raw_traces = bool(traces_loaded)
         traces_loaded_str = f"_({len(traces_loaded):,} loaded)_" if traces_loaded else ""
 
         st.markdown(f"**📊 Traces** {traces_loaded_str}")
@@ -270,31 +282,34 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         with c_fetch:
             fetch_clicked = st.button("🚀 Fetch traces", type="primary", width="stretch")
         with c_dl:
-            traces_for_dl = st.session_state.get("stats_traces_raw", [])
-            if traces_for_dl:
-                normed_for_dl = [normalize_trace_format(t) for t in traces_for_dl]
-                out_rows = []
-                for n in normed_for_dl:
-                    prompt = active_turn_prompt(n) or first_human_prompt(n)
-                    answer = active_turn_answer(n) or final_ai_message(n)
-                    dt = parse_trace_dt(n)
-                    out_rows.append({
-                        "trace_id": n.get("id"),
-                        "timestamp": dt,
-                        "date": dt.date() if dt else None,
-                        "environment": n.get("environment"),
-                        "session_id": n.get("sessionId"),
-                        "user_id": n.get("userId") or (n.get("metadata") or {}).get("user_id") or (n.get("metadata") or {}).get("userId"),
-                        "latency_seconds": as_float(n.get("latency")),
-                        "total_cost": as_float(n.get("totalCost")),
-                        "outcome": classify_outcome(n, answer or ""),
-                        "prompt": prompt,
-                        "answer": answer,
-                    })
-                raw_csv_bytes = csv_bytes_any(out_rows)
+            if has_raw_traces:
+                # Cache CSV bytes in session state so we don't re-normalise on every page nav.
+                _raw_count = len(st.session_state.get("stats_traces_raw", []))
+                if st.session_state.get("_raw_csv_cache_count") != _raw_count:
+                    normed_for_dl = [normalize_trace_format(t) for t in st.session_state.stats_traces_raw]
+                    out_rows = []
+                    for n in normed_for_dl:
+                        prompt = active_turn_prompt(n) or first_human_prompt(n)
+                        answer = active_turn_answer(n) or final_ai_message(n)
+                        dt = parse_trace_dt(n)
+                        out_rows.append({
+                            "trace_id": n.get("id"),
+                            "timestamp": dt,
+                            "date": dt.date() if dt else None,
+                            "environment": n.get("environment"),
+                            "session_id": n.get("sessionId"),
+                            "user_id": n.get("userId") or (n.get("metadata") or {}).get("user_id") or (n.get("metadata") or {}).get("userId"),
+                            "latency_seconds": as_float(n.get("latency")),
+                            "total_cost": as_float(n.get("totalCost")),
+                            "outcome": classify_outcome(n, answer or ""),
+                            "prompt": prompt,
+                            "answer": answer,
+                        })
+                    st.session_state._raw_csv_bytes = csv_bytes_any(out_rows)
+                    st.session_state._raw_csv_cache_count = _raw_count
                 st.download_button(
                     label="⬇️ Raw traces csv",
-                    data=raw_csv_bytes,
+                    data=st.session_state._raw_csv_bytes,
                     file_name=f"gnw_traces_raw_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv",
                     mime="text/csv",
                     key="raw_csv_download",
@@ -323,7 +338,7 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         # --- User data enrichment (shown after traces are loaded) ---
         user_fetch_clicked = False
         user_invalidate_clicked = False
-        if traces_loaded:
+        if has_raw_traces:
             if "analytics_user_first_seen" not in st.session_state:
                 st.session_state.analytics_user_first_seen = None
             if "analytics_user_first_seen_debug" not in st.session_state:
@@ -334,12 +349,14 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             users_loaded_str = f"_({len(st.session_state.analytics_user_first_seen):,} loaded)_" if has_user_data else ""
             st.markdown(f"**👥 User data** {users_loaded_str}")
 
+            _saved_excl = st.session_state.get("_shadow_exclude_internal", True)
             st.checkbox(
                 "Exclude internal users",
-                value=True,
+                value=_saved_excl,
                 key="exclude_internal_users_checkbox",
                 help="If enabled, remove internal/test accounts from the fetched user table.",
             )
+            st.session_state._shadow_exclude_internal = st.session_state.get("exclude_internal_users_checkbox", True)
 
             u_c1, u_c2 = st.columns(2)
             with u_c1:
@@ -444,8 +461,8 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         st.session_state.gemini_api_key = gemini_api_key
         st.session_state.base_thread_url = base_thread_url
         st.session_state.envs = envs
-        # NOTE: Do not assign to keys that are bound to widgets (environment/date_preset/start_date/end_date)
-        # after the widget is instantiated. Streamlit manages these keys.
+        # NOTE: Do not assign to keys that are bound to widgets (environment/date_preset)
+        # after the widget is instantiated. Streamlit manages those keys.
         st.session_state.use_date_filter = use_date_filter
 
     # Handle CSV upload (outside the sidebar layout)
@@ -461,7 +478,7 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             envs=envs,
             stats_page_limit=int(stats_page_limit),
             stats_page_size=int(stats_page_size),
-            exclude_internal_users=bool(st.session_state.get("exclude_internal_users_checkbox", True)),
+            exclude_internal_users=bool(st.session_state.get("_shadow_exclude_internal", True)),
             internal_user_ids=internal_user_ids,
         )
 
@@ -553,7 +570,7 @@ def _handle_fetch(
     st.session_state.stats_traces_raw = traces_raw
 
     internal_user_ids = _load_internal_user_ids()
-    exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+    exclude_internal_users = bool(st.session_state.get("_shadow_exclude_internal", True))
     traces = _apply_trace_filters(
         traces_raw=traces_raw,
         exclude_internal_users=exclude_internal_users,
@@ -815,7 +832,7 @@ def _handle_csv_upload(uploaded_file: Any) -> None:
         st.session_state.stats_traces_raw = traces
 
         internal_user_ids = _load_internal_user_ids()
-        exclude_internal_users = bool(st.session_state.get("exclude_internal_users_checkbox", True))
+        exclude_internal_users = bool(st.session_state.get("_shadow_exclude_internal", True))
         st.session_state.stats_traces = _apply_trace_filters(
             traces_raw=traces,
             exclude_internal_users=exclude_internal_users,
