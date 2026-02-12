@@ -214,14 +214,72 @@ def render(base_thread_url: str) -> None:
         st.info("Use the sidebar **🚀 Fetch traces** button first.")
         return
 
+    with st.expander("🔽 Apply Filters", expanded=False):
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            session_id_filter = st.text_input(
+                "Session id",
+                value=str(st.session_state.get("trace_explorer_filter_session_id") or ""),
+                key="trace_explorer_filter_session_id",
+                placeholder="e.g. 7f6b…",
+            )
+        with f2:
+            trace_id_filter = st.text_input(
+                "Trace id",
+                value=str(st.session_state.get("trace_explorer_filter_trace_id") or ""),
+                key="trace_explorer_filter_trace_id",
+                placeholder="e.g. 3a2c…",
+            )
+        with f3:
+            prompt_substring_filter = st.text_input(
+                "Prompt contains",
+                value=str(st.session_state.get("trace_explorer_filter_prompt_substring") or ""),
+                key="trace_explorer_filter_prompt_substring",
+                placeholder="substring…",
+            )
+
+        session_id_filter_n = str(session_id_filter or "").strip().lower()
+        trace_id_filter_n = str(trace_id_filter or "").strip().lower()
+        prompt_substring_filter_n = str(prompt_substring_filter or "").strip().lower()
+
+        filtered_idxs: list[int] = []
+        for i, t in enumerate(traces):
+            tid = str(t.get("id") or "").strip().lower()
+            sid = str(t.get("sessionId") or "").strip().lower()
+            prompt = str(_current_user_prompt(t) or "").strip().lower()
+
+            if session_id_filter_n and session_id_filter_n not in sid:
+                continue
+            if trace_id_filter_n and trace_id_filter_n not in tid:
+                continue
+            if prompt_substring_filter_n and prompt_substring_filter_n not in prompt:
+                continue
+
+            filtered_idxs.append(i)
+
+    if not filtered_idxs:
+        st.warning("No traces match the current filters.")
+        return
+
     col1, col2 = st.columns([2, 1])
 
     with col1:
+        prev_selected = st.session_state.get("trace_explorer_selected_idx")
+        try:
+            prev_selected_int = int(prev_selected) if prev_selected is not None else None
+        except Exception:
+            prev_selected_int = None
+
+        default_pos = 0
+        if isinstance(prev_selected_int, int) and prev_selected_int in filtered_idxs:
+            default_pos = filtered_idxs.index(prev_selected_int)
+
+        filtered_traces_str = f"(Showing {len(filtered_idxs):,} / {len(traces):,} traces)" if len(filtered_idxs) < len(traces) else ""
         idx = st.selectbox(
-            "Select trace",
-            options=list(range(len(traces))),
+            f"Select trace {filtered_traces_str}",
+            options=filtered_idxs,
             format_func=lambda i: _trace_label(traces[int(i)]),
-            index=0,
+            index=default_pos,
             key="trace_explorer_selected_idx",
         )
 
