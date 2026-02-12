@@ -198,47 +198,6 @@ def daily_latency_chart(daily_metrics: pd.DataFrame) -> alt.Chart:
         )
         .properties(title="Daily latency")
     )
-
-    outcome_long["metric"] = outcome_long["metric"].replace({
-        "error_rate": "Error",
-        "empty_rate": "Error (Empty)",
-        "defer_rate": "Defer",
-        "soft_error_rate": "Soft error",
-        "success_rate": "Success",
-    })
-
-    order = list(outcome_order) if outcome_order is not None else [
-        "Success",
-        "Soft error",
-        "Defer",
-        "Error (Empty)",
-        "Error",
-    ]
-
-    default_colors: dict[str, str] = {
-        "Success": "#0068C9",
-        "Soft error": "#83C9FF",
-        "Defer": "#D5DAE5",
-        "Error (Empty)": "#FFABAB",
-        "Error": "#FF2B2B",
-    }
-    color_map = {**default_colors, **(dict(outcome_colors) if outcome_colors is not None else {})}
-    color_scale = alt.Scale(domain=order, range=[color_map.get(k, "#999999") for k in order])
-    return (
-        alt.Chart(outcome_long)
-        .mark_area()
-        .encode(
-            x=alt.X("date:T", title="Date"),
-            y=alt.Y("value:Q", title="Rate", stack="normalize", axis=alt.Axis(format="%")),
-            color=alt.Color("metric:N", title="Outcome", sort=order, scale=color_scale),
-            tooltip=[
-                alt.Tooltip("date:T", title="Date"),
-                alt.Tooltip("metric:N", title="Outcome"),
-                alt.Tooltip("value:Q", title="Rate", format=".1%"),
-            ],
-        )
-        .properties(title="Daily outcome rates")
-    )
     
 def outcome_pie_chart(df: pd.DataFrame) -> alt.Chart:
     """Create outcome breakdown pie chart."""
@@ -256,7 +215,7 @@ def outcome_pie_chart(df: pd.DataFrame) -> alt.Chart:
         }
     )
 
-    order = ["Success", "Soft error", "Defer", "Error (Empty)", "Error"]
+    order = ["Error", "Error (Empty)", "Defer", "Soft error", "Success"]
     default_colors: dict[str, str] = {
         "Success": "#0068C9",
         "Soft error": "#83C9FF",
