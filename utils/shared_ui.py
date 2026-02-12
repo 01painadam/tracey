@@ -327,13 +327,18 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         # --- CSV upload as alternative to LF pull ---
         with st.expander("📤 Upload trace CSV", expanded=False):
             st.caption("Upload a previously downloaded trace CSV instead of pulling from Langfuse.")
-            uploaded_file = st.file_uploader(
+            uploaded_files = st.file_uploader(
                 "Trace CSV",
                 type=["csv"],
                 key="trace_csv_uploader",
                 label_visibility="collapsed",
+                accept_multiple_files=True,
             )
-            upload_clicked = st.button("Load CSV", disabled=uploaded_file is None, width="stretch")
+            upload_clicked = st.button(
+                "Load CSV",
+                disabled=not bool(uploaded_files),
+                width="stretch",
+            )
 
         # --- User data enrichment (shown after traces are loaded) ---
         user_fetch_clicked = False
@@ -466,8 +471,8 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         st.session_state.use_date_filter = use_date_filter
 
     # Handle CSV upload (outside the sidebar layout)
-    if upload_clicked and uploaded_file is not None:
-        _handle_csv_upload(uploaded_file)
+    if upload_clicked and uploaded_files:
+        _handle_csv_upload(uploaded_files)
 
     # Handle user data fetch
     if user_fetch_clicked:
@@ -796,26 +801,42 @@ def _fetch_single(
     return traces
 
 
-def _handle_csv_upload(uploaded_file: Any) -> None:
-    """Handle CSV upload as alternative to Langfuse fetch.
-
-    Reconstructs minimal trace dicts from the CSV columns so that
-    existing parsing/analytics pipelines work transparently.
-    """
+def _parse_trace_csv_bytes_list(raw_csvs: list[bytes]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     import io
     import csv as csv_mod
 
-    try:
-        raw = uploaded_file.getvalue()
+    traces: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    stats = {
+        "files": 0,
+        "rows": 0,
+        "loaded": 0,
+        "dupe_trace_id": 0,
+        "machine_user": 0,
+    }
+
+    for raw in (raw_csvs or []):
+        if not raw:
+            continue
+        stats["files"] += 1
         text = raw.decode("utf-8-sig") if raw[:3] == b"\xef\xbb\xbf" else raw.decode("utf-8")
         reader = csv_mod.DictReader(io.StringIO(text))
-        traces: list[dict[str, Any]] = []
         for row in reader:
+            stats["rows"] += 1
+
+            trace_id = str(row.get("trace_id") or "").strip()
+            if trace_id and trace_id in seen_ids:
+                stats["dupe_trace_id"] += 1
+                continue
+
             user_id = str(row.get("user_id") or "").strip()
             if _is_machine_user_id(user_id):
+                stats["machine_user"] += 1
                 continue
+
             trace: dict[str, Any] = {
-                "id": row.get("trace_id") or "",
+                "id": trace_id,
                 "timestamp": row.get("timestamp") or "",
                 "environment": row.get("environment") or "",
                 "sessionId": row.get("session_id") or "",
@@ -828,6 +849,28 @@ def _handle_csv_upload(uploaded_file: Any) -> None:
                 "_from_csv": True,
             }
             traces.append(trace)
+            stats["loaded"] += 1
+            if trace_id:
+                seen_ids.add(trace_id)
+
+    return traces, stats
+
+
+def _handle_csv_upload(uploaded_files: list[Any]) -> None:
+    """Handle CSV upload as alternative to Langfuse fetch.
+
+    Reconstructs minimal trace dicts from the CSV columns so that
+    existing parsing/analytics pipelines work transparently.
+    """
+    try:
+        raw_csvs: list[bytes] = []
+        for f in (uploaded_files or []):
+            try:
+                raw_csvs.append(f.getvalue())
+            except Exception:
+                continue
+
+        traces, stats = _parse_trace_csv_bytes_list(raw_csvs)
 
         st.session_state.stats_traces_raw = traces
 
@@ -839,7 +882,7 @@ def _handle_csv_upload(uploaded_file: Any) -> None:
             internal_user_ids=internal_user_ids,
         )
 
-        st.session_state.fetch_debug = {"source": "csv_upload", "rows": len(traces)}
+        st.session_state.fetch_debug = {"source": "csv_upload", **stats}
         st.session_state.fetch_warning = {}
         st.toast(f"Loaded {len(traces):,} traces from CSV")
         st.rerun()
