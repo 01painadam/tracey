@@ -143,6 +143,8 @@ def _enrich_batch(
     model_name: str,
     rows: list[dict[str, Any]],
     max_chars: int,
+    system_instruction: str | None = None,
+    batch_prompt_template: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Enrich a batch of traces via Gemini structured output.
 
@@ -151,14 +153,16 @@ def _enrich_batch(
     payload = _build_batch_payload(rows, max_chars)
     traces_json = json.dumps(payload, ensure_ascii=False)
 
-    prompt = DEFAULT_ENRICHMENT_BATCH_PROMPT.format(traces_json=traces_json)
+    template = batch_prompt_template or DEFAULT_ENRICHMENT_BATCH_PROMPT
+    prompt = template.format(traces_json=traces_json)
 
+    sys_instr = system_instruction or DEFAULT_ENRICHMENT_SYSTEM
     result = call_gemini_structured(
         api_key,
         model_name,
         prompt,
         response_schema=BatchEnrichmentResponse,
-        system_instruction=DEFAULT_ENRICHMENT_SYSTEM,
+        system_instruction=sys_instr,
         temperature=0.1,
     )
 
@@ -187,9 +191,12 @@ def _enrich_single(
     model_name: str,
     row: dict[str, Any],
     max_chars: int,
+    system_instruction: str | None = None,
+    single_prompt_template: str | None = None,
 ) -> dict[str, Any]:
     """Enrich a single trace via Gemini structured output."""
-    prompt = DEFAULT_ENRICHMENT_PROMPT.format(
+    template = single_prompt_template or DEFAULT_ENRICHMENT_PROMPT
+    prompt = template.format(
         user_prompt=truncate_text(str(row.get("prompt") or ""), max_chars),
         assistant_response=truncate_text(str(row.get("answer") or ""), max_chars),
         outcome_heuristic=row.get("outcome_heuristic", ""),
@@ -199,12 +206,13 @@ def _enrich_single(
         aoi_type=row.get("aoi_type", ""),
     )
 
+    sys_instr = system_instruction or DEFAULT_ENRICHMENT_SYSTEM
     result = call_gemini_structured(
         api_key,
         model_name,
         prompt,
         response_schema=TraceEnrichment,
-        system_instruction=DEFAULT_ENRICHMENT_SYSTEM,
+        system_instruction=sys_instr,
         temperature=0.1,
     )
 
@@ -225,6 +233,9 @@ def run_enrichment(
     max_chars_per_trace: int = 4000,
     user_batch_size: int | None = None,
     progress_container: Any = None,
+    system_instruction: str | None = None,
+    batch_prompt_template: str | None = None,
+    single_prompt_template: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run enrichment on raw traces, returning enriched trace dicts.
 
@@ -238,6 +249,9 @@ def run_enrichment(
         max_chars_per_trace: Max chars per prompt/answer field.
         user_batch_size: User-specified batch size (capped by model limit).
         progress_container: Streamlit container for progress bar.
+        system_instruction: Custom system instruction (uses default if None).
+        batch_prompt_template: Custom batch prompt template (uses default if None).
+        single_prompt_template: Custom single prompt template (uses default if None).
 
     Returns:
         List of enriched trace dicts (all traces, not just newly enriched).
@@ -282,7 +296,11 @@ def run_enrichment(
         for batch in batches:
             if len(batch) > 1:
                 # Batch enrichment
-                batch_results = _enrich_batch(api_key, model_name, batch, max_chars_per_trace)
+                batch_results = _enrich_batch(
+                    api_key, model_name, batch, max_chars_per_trace,
+                    system_instruction=system_instruction,
+                    batch_prompt_template=batch_prompt_template,
+                )
 
                 # Fallback to single for any missed traces
                 for r in batch:
@@ -292,7 +310,11 @@ def run_enrichment(
                     else:
                         # Batch missed this trace — try single
                         try:
-                            single_result = _enrich_single(api_key, model_name, r, max_chars_per_trace)
+                            single_result = _enrich_single(
+                                api_key, model_name, r, max_chars_per_trace,
+                                system_instruction=system_instruction,
+                                single_prompt_template=single_prompt_template,
+                            )
                             enriched_row = {**r, **single_result}
                         except Exception:
                             enriched_row = {**r, **coerce_enrichment({})}
@@ -309,7 +331,11 @@ def run_enrichment(
                 r = batch[0]
                 tid = str(r.get("trace_id") or "")
                 try:
-                    single_result = _enrich_single(api_key, model_name, r, max_chars_per_trace)
+                    single_result = _enrich_single(
+                        api_key, model_name, r, max_chars_per_trace,
+                        system_instruction=system_instruction,
+                        single_prompt_template=single_prompt_template,
+                    )
                     enriched_row = {**r, **single_result}
                 except Exception:
                     enriched_row = {**r, **coerce_enrichment({})}
@@ -374,6 +400,36 @@ def render(
         "Enriched data feeds all analysis modes and the report generator."
     )
 
+    # --- Editable system prompts ---
+    with st.expander("📝 Edit system prompts", expanded=False):
+        st.caption(
+            "These prompts are sent to Gemini during enrichment. "
+            "The **system instruction** sets the analyst persona. "
+            "The **batch prompt** is used when processing multiple traces at once. "
+            "The **single prompt** is used as a fallback for individual traces."
+        )
+        enrichment_system = st.text_area(
+            "System instruction",
+            value=st.session_state.get("enrichment_system_prompt", DEFAULT_ENRICHMENT_SYSTEM),
+            height=120,
+            key="enrichment_system_prompt",
+        )
+        enrichment_batch_prompt = st.text_area(
+            "Batch enrichment prompt",
+            value=st.session_state.get("enrichment_batch_prompt", DEFAULT_ENRICHMENT_BATCH_PROMPT),
+            height=300,
+            key="enrichment_batch_prompt",
+            help="Use `{traces_json}` as placeholder for the batch payload.",
+        )
+        enrichment_single_prompt = st.text_area(
+            "Single trace enrichment prompt",
+            value=st.session_state.get("enrichment_single_prompt", DEFAULT_ENRICHMENT_PROMPT),
+            height=300,
+            key="enrichment_single_prompt",
+            help="Placeholders: `{user_prompt}`, `{assistant_response}`, `{outcome_heuristic}`, "
+                 "`{tools_used}`, `{datasets_analysed}`, `{aoi_name}`, `{aoi_type}`.",
+        )
+
     enriched = get_enriched_traces()
     stale = is_enrichment_stale(traces) if enriched else True
 
@@ -428,6 +484,9 @@ def render(
                 model_name=gemini_model,
                 max_chars_per_trace=max_chars_per_trace,
                 progress_container=progress_container,
+                system_instruction=enrichment_system,
+                batch_prompt_template=enrichment_batch_prompt,
+                single_prompt_template=enrichment_single_prompt,
             )
 
         if result:
@@ -470,25 +529,25 @@ def _render_enrichment_summary(enriched: list[dict[str, Any]]) -> None:
         if "topic" in df.columns:
             counts = df["topic"].value_counts().reset_index()
             counts.columns = ["topic", "count"]
-            st.dataframe(counts, hide_index=True, use_container_width=True)
+            st.dataframe(counts, hide_index=True, width="stretch")
 
     with dist_tabs[1]:
         if "query_type" in df.columns:
             counts = df["query_type"].value_counts().reset_index()
             counts.columns = ["query_type", "count"]
-            st.dataframe(counts, hide_index=True, use_container_width=True)
+            st.dataframe(counts, hide_index=True, width="stretch")
 
     with dist_tabs[2]:
         if "complexity" in df.columns:
             counts = df["complexity"].value_counts().reset_index()
             counts.columns = ["complexity", "count"]
-            st.dataframe(counts, hide_index=True, use_container_width=True)
+            st.dataframe(counts, hide_index=True, width="stretch")
 
     with dist_tabs[3]:
         if "outcome" in df.columns:
             counts = df["outcome"].value_counts().reset_index()
             counts.columns = ["outcome", "count"]
-            st.dataframe(counts, hide_index=True, use_container_width=True)
+            st.dataframe(counts, hide_index=True, width="stretch")
 
     with dist_tabs[4]:
         if "failure_mode" in df.columns:
@@ -496,7 +555,7 @@ def _render_enrichment_summary(enriched: list[dict[str, Any]]) -> None:
             if len(fm):
                 counts = fm["failure_mode"].value_counts().reset_index()
                 counts.columns = ["failure_mode", "count"]
-                st.dataframe(counts, hide_index=True, use_container_width=True)
+                st.dataframe(counts, hide_index=True, width="stretch")
             else:
                 st.info("No failure modes detected.")
 
@@ -511,4 +570,4 @@ def _render_enrichment_summary(enriched: list[dict[str, Any]]) -> None:
         display_df = df[existing_cols].copy()
         if "prompt" in display_df.columns:
             display_df["prompt"] = display_df["prompt"].astype(str).str[:100] + "..."
-        st.dataframe(display_df, hide_index=True, use_container_width=True)
+        st.dataframe(display_df, hide_index=True, width="stretch")

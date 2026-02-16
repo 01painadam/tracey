@@ -154,6 +154,20 @@ def render(base_thread_url: str) -> None:
         st.info("Run **⚡ Enrichment** first to generate a report.")
         return
 
+    # --- Editable system prompt ---
+    with st.expander("📝 Edit system prompt", expanded=False):
+        st.caption(
+            "This prompt is sent to Claude to generate the report. "
+            "Use `{trace_count}`, `{date_range}`, and `{analysis_data}` as placeholders."
+        )
+        report_prompt_template = st.text_area(
+            "Report prompt",
+            value=st.session_state.get("report_prompt_template", DEFAULT_REPORT_PROMPT),
+            height=400,
+            key="report_prompt_template",
+            label_visibility="collapsed",
+        )
+
     # Claude availability check
     claude_ok = is_claude_available()
     if not claude_ok:
@@ -189,7 +203,7 @@ def render(base_thread_url: str) -> None:
             if len(ts):
                 date_range = f"{ts.min().date()} to {ts.max().date()}"
 
-        prompt = DEFAULT_REPORT_PROMPT.format(
+        prompt = report_prompt_template.format(
             trace_count=len(enriched),
             date_range=date_range,
             analysis_data=analysis_data,

@@ -37,7 +37,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("topic:N", legend=None),
             tooltip=["topic:N", "count:Q"],
         ).properties(height=max(180, len(topic_counts) * 28))
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
         # Drill-down
         selected_topic = st.selectbox(
@@ -78,14 +78,14 @@ def render(base_thread_url: str) -> None:
                 )
             )
 
-            st.dataframe(demand_counts, hide_index=True, use_container_width=True)
+            st.dataframe(demand_counts, hide_index=True, width="stretch")
 
             # Unmet demand
             unmet = demand_counts[~demand_counts["in_catalog"]]
             if len(unmet):
                 st.markdown("##### ⚠️ Unmet dataset demand")
                 st.caption("Datasets users ask for that don't match the known catalog.")
-                st.dataframe(unmet[["dataset", "demand_count"]], hide_index=True, use_container_width=True)
+                st.dataframe(unmet[["dataset", "demand_count"]], hide_index=True, width="stretch")
         else:
             st.info("No dataset requirements identified in enriched traces.")
 
@@ -99,7 +99,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("query_type:N", title="Query type"),
             tooltip=["query_type:N", "count:Q"],
         ).properties(height=300)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # --- Geographic scope ---
     st.markdown("#### Geographic scope")
@@ -113,7 +113,7 @@ def render(base_thread_url: str) -> None:
                 y=alt.Y("geography:N", sort="-x", title=None),
                 tooltip=["geography:N", "count:Q"],
             ).properties(height=max(180, len(geo_counts) * 28))
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
         else:
             st.info("No geographic scope data in enriched traces.")
 
@@ -128,4 +128,4 @@ def render(base_thread_url: str) -> None:
                 color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), title="Count"),
                 tooltip=["topic:N", "query_type:N", "count:Q"],
             ).properties(height=max(200, df["topic"].nunique() * 28))
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")

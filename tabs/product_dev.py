@@ -6,6 +6,7 @@ evidence mining, and report generator.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import streamlit as st
@@ -140,7 +141,9 @@ def render(
     )
 
     # --- Pipeline tabs ---
-    tabs = st.tabs([
+    show_report = os.environ.get("ENABLE_CLAUDE_REPORT", "").lower() in ("1", "true", "yes")
+
+    tab_labels = [
         "⚡ Enrichment",
         "📊 Topics & Datasets",
         "🎯 JTBD",
@@ -148,8 +151,11 @@ def render(
         "❌ Failures",
         "💡 Feature Gaps",
         "🔍 Evidence Mining",
-        "📝 Report",
-    ])
+    ]
+    if show_report:
+        tab_labels.append("📝 Report")
+
+    tabs = st.tabs(tab_labels)
 
     # Tab 0: Enrichment
     with tabs[0]:
@@ -200,7 +206,8 @@ def render(
             max_chars_per_trace=max_chars_per_trace,
         )
 
-    # Tab 7: Report
-    with tabs[7]:
-        from tabs.product_intel.report import render as render_report
-        render_report(base_thread_url=base_thread_url)
+    # Tab 7: Report (only when ENABLE_CLAUDE_REPORT is set)
+    if show_report:
+        with tabs[7]:
+            from tabs.product_intel.report import render as render_report
+            render_report(base_thread_url=base_thread_url)

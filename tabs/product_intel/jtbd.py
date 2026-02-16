@@ -86,13 +86,13 @@ def render(base_thread_url: str) -> None:
         ),
         tooltip=["intent:N", "outcome:N", "count:Q"],
     ).properties(height=max(200, top_n * 28))
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
     # Intent table
     display_table = top_intents[["intent_norm", "count", "success_rate", "example_prompt"]].copy()
     display_table.columns = ["Intent", "Count", "Success Rate", "Example Prompt"]
     display_table["Example Prompt"] = display_table["Example Prompt"].astype(str).str[:100] + "..."
-    st.dataframe(display_table, hide_index=True, use_container_width=True)
+    st.dataframe(display_table, hide_index=True, width="stretch")
 
     # Drill-down
     selected = st.selectbox(
@@ -113,7 +113,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("complexity:N", title="Complexity"),
             tooltip=["complexity:N", "count:Q"],
         ).properties(height=250)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # --- Complexity × Outcome ---
     st.markdown("#### Complexity × Outcome")
@@ -131,4 +131,4 @@ def render(base_thread_url: str) -> None:
             ),
             tooltip=["complexity:N", "outcome:N", "count:Q"],
         ).properties(height=300)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")

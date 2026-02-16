@@ -40,7 +40,7 @@ def render(base_thread_url: str) -> None:
                 y=alt.Y("query_type:N", sort="-x", title=None),
                 tooltip=["query_type:N", "count:Q"],
             ).properties(height=max(150, len(qt_counts) * 28))
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
         render_trace_evidence(
             cap_gaps.to_dict("records"), base_thread_url,
@@ -67,7 +67,7 @@ def render(base_thread_url: str) -> None:
             ds_counts["in_catalog"] = ds_counts["dataset"].apply(
                 lambda d: any(d.lower() in n or n in d.lower() for n in known_names_lower)
             )
-            st.dataframe(ds_counts, hide_index=True, use_container_width=True)
+            st.dataframe(ds_counts, hide_index=True, width="stretch")
 
         render_trace_evidence(
             missing_ds.to_dict("records"), base_thread_url,
@@ -92,7 +92,7 @@ def render(base_thread_url: str) -> None:
         weak = qt_success[qt_success["success_rate"] < 0.5]
         if len(weak):
             st.caption("Query types with <50% success rate — may indicate unsupported capabilities.")
-            st.dataframe(weak, hide_index=True, use_container_width=True)
+            st.dataframe(weak, hide_index=True, width="stretch")
         else:
             st.success("All query types have ≥50% success rate.")
 
@@ -126,6 +126,6 @@ def render(base_thread_url: str) -> None:
                 count=("description", "size"),
                 example=("description", "first"),
             ).reset_index().sort_values("count", ascending=False)
-            st.dataframe(grouped, hide_index=True, use_container_width=True)
+            st.dataframe(grouped, hide_index=True, width="stretch")
     else:
         st.info("No feature gaps identified. This is good news — or enrichment data may be limited.")

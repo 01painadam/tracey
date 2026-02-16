@@ -65,7 +65,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("topic:N", title="Topic"),
             tooltip=["period:T", "topic:N", "count:Q"],
         ).properties(height=350)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # --- Query type trends ---
     st.markdown("#### Query type trends")
@@ -77,7 +77,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("query_type:N", title="Query type"),
             tooltip=["period:T", "query_type:N", "count:Q"],
         ).properties(height=300)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # --- Success rate over time ---
     st.markdown("#### Success rate over time")
@@ -97,7 +97,7 @@ def render(base_thread_url: str) -> None:
             y=alt.Y("success_rate:Q", title="Success rate", scale=alt.Scale(domain=[0, 1])),
             tooltip=["period:T", "success_rate:Q", "total:Q"],
         ).properties(height=250)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # --- Emerging / declining topics ---
     st.markdown("#### Emerging & declining topics")
@@ -130,4 +130,4 @@ def render(base_thread_url: str) -> None:
                 })
 
             changes_df = pd.DataFrame(changes).sort_values("change", ascending=False)
-            st.dataframe(changes_df, hide_index=True, use_container_width=True)
+            st.dataframe(changes_df, hide_index=True, width="stretch")

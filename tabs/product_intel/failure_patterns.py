@@ -58,7 +58,7 @@ def render(base_thread_url: str) -> None:
                 ),
                 tooltip=["failure_mode:N", "count:Q"],
             ).properties(height=300)
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
             # Drill-down
             selected_fm = st.selectbox(
@@ -84,7 +84,7 @@ def render(base_thread_url: str) -> None:
                 color=alt.Color("failure_mode:N", title="Failure mode"),
                 tooltip=["topic:N", "failure_mode:N", "count:Q"],
             ).properties(height=max(200, cross["topic"].nunique() * 28))
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
     # --- Heuristic vs LLM outcome comparison ---
     st.markdown("#### Heuristic vs LLM outcome")
@@ -97,7 +97,7 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("count:Q", scale=alt.Scale(scheme="blues"), title="Count"),
             tooltip=["outcome_heuristic:N", "outcome:N", "count:Q"],
         ).properties(height=250)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
         # Disagreements
         disagree = df[df["outcome_heuristic"].apply(
@@ -127,4 +127,4 @@ def render(base_thread_url: str) -> None:
             color=alt.Color("complexity:N", legend=None),
             tooltip=["complexity:N", "failure_rate:Q", "total:Q", "failures:Q"],
         ).properties(height=250)
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
