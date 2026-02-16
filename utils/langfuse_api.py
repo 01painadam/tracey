@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import time as time_mod
 from pathlib import Path
 from typing import Any
@@ -464,6 +465,10 @@ def fetch_traces_window(
     debug_out: dict[str, Any] | None = None,
     use_disk_cache: bool = True,
     cache_dir: str | None = None,
+    max_page_retry_s: float = 60.0,
+    rate_limiter: Any | None = None,
+    budget: Any | None = None,
+    on_progress: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch traces from Langfuse within a time window with pagination."""
     url = f"{base_url.rstrip('/')}/api/public/traces"
@@ -484,10 +489,20 @@ def fetch_traces_window(
     cache_path = _cache_path("traces", cache_payload, cache_root)
     if use_disk_cache:
         cached = _try_load_cache(cache_path)
-        if isinstance(cached, list) and all(isinstance(x, dict) for x in cached):
+        # New format (v2): {"version": 2, "complete": bool, "data": [...]}
+        if isinstance(cached, dict) and cached.get("version") == 2:
+            data_list = cached.get("data")
+            if cached.get("complete") and isinstance(data_list, list):
+                if isinstance(debug_out, dict):
+                    debug_out.clear()
+                    debug_out.update({"cache_hit": True, "cache_path": str(cache_path), "cache_version": 2})
+                return list(data_list)
+            # Incomplete cache — ignore, re-fetch
+        # Old format (v1): bare list of dicts — treat as complete (backwards compat)
+        elif isinstance(cached, list) and all(isinstance(x, dict) for x in cached):
             if isinstance(debug_out, dict):
                 debug_out.clear()
-                debug_out.update({"cache_hit": True, "cache_path": str(cache_path)})
+                debug_out.update({"cache_hit": True, "cache_path": str(cache_path), "cache_version": 1})
             return list(cached)
 
     session = requests.Session()
@@ -522,7 +537,15 @@ def fetch_traces_window(
             }
         )
 
-    while page <= page_limit and len(rows) < max_traces:
+    fetch_complete = True  # set False on error / early stop
+
+    def _budget_traces_left() -> int:
+        """How many traces we can still accept."""
+        if budget is not None:
+            return budget.remaining()
+        return max_traces - len(rows)
+
+    while page <= page_limit and _budget_traces_left() > 0:
         params: dict[str, Any] = {
             "fromTimestamp": from_iso,
             "toTimestamp": to_iso,
@@ -534,21 +557,74 @@ def fetch_traces_window(
 
         attempts = 0
         last_error: str | None = None
+        page_start = time_mod.monotonic()
+
         while True:
+            # --- per-page time budget check ---
+            if time_mod.monotonic() - page_start > max_page_retry_s:
+                last_error = f"Exceeded {max_page_retry_s}s retry budget for page {page}"
+                break
+
+            # --- rate limiter (shared across workers) ---
+            if rate_limiter is not None:
+                remaining_budget = max_page_retry_s - (time_mod.monotonic() - page_start)
+                if remaining_budget <= 0 or not rate_limiter.acquire(timeout=remaining_budget):
+                    last_error = f"Rate limiter acquire timed out on page {page}"
+                    break
+
+            # --- HTTP request (with network-error handling) ---
             t0 = time_mod.time()
-            r = session.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
-            elapsed_s = time_mod.time() - t0
+            r: requests.Response | None = None
+            elapsed_s: float = 0.0
+            try:
+                r = session.get(url, headers=headers, params=params, timeout=float(http_timeout_s))
+                elapsed_s = time_mod.time() - t0
+            except (requests.ConnectionError, requests.Timeout, OSError) as exc:
+                elapsed_s = time_mod.time() - t0
+                attempts += 1
+                if attempts <= retry and (time_mod.monotonic() - page_start) < max_page_retry_s:
+                    delay = backoff * (2 ** (attempts - 1)) + random.uniform(0, backoff)
+                    delay = min(delay, max(0, max_page_retry_s - (time_mod.monotonic() - page_start)))
+                    time_mod.sleep(max(0, delay))
+                    continue
+                last_error = f"Network error on page {page} after {attempts} attempts: {exc!r}"
+                break
+
+            assert r is not None  # for type-checker; loop guarantees this
+
             if r.status_code < 400:
                 last_error = None
                 break
 
-            # Langfuse/ClickHouse can error on large pages/time windows (esp. when reading the `output` column).
-            # If we detect a server-side memory error, back off the per-page limit and retry the same page.
+            # --- parse response body for error classification ---
             text_preview = ""
             try:
                 text_preview = str(getattr(r, "text", "") or "")
             except Exception:
                 text_preview = ""
+
+            # --- 429: rate-limited by server ---
+            if r.status_code == 429:
+                retry_after_raw = r.headers.get("Retry-After")
+                try:
+                    retry_after = float(retry_after_raw) if retry_after_raw else backoff * (2 ** attempts)
+                except (ValueError, TypeError):
+                    retry_after = backoff * (2 ** attempts)
+                # Propagate pause to all workers sharing this rate limiter
+                if rate_limiter is not None:
+                    try:
+                        rate_limiter.pause_until(time_mod.monotonic() + retry_after)
+                    except Exception:
+                        pass
+                remaining_budget = max_page_retry_s - (time_mod.monotonic() - page_start)
+                sleep_time = min(retry_after, remaining_budget)
+                if sleep_time > 0:
+                    time_mod.sleep(sleep_time)
+                    continue  # 429 does NOT count against retry limit
+                last_error = f"429 rate limited on page {page}, no retry budget left"
+                break
+
+            # --- ClickHouse memory error: halve page size ---
             is_memory_error = (
                 r.status_code == 500
                 and isinstance(text_preview, str)
@@ -571,21 +647,25 @@ def fetch_traces_window(
                         )
                     limit = new_limit
                     params["limit"] = limit
-                    # Reset attempts when we change strategy; wait briefly to avoid hammering the server.
                     attempts = 0
                     time_mod.sleep(max(0.1, float(backoff)))
                     continue
 
+            # --- 5xx: exponential backoff with jitter ---
             if 500 <= r.status_code < 600 and attempts < retry:
                 attempts += 1
                 last_error = f"Langfuse 5xx on page {page} (status {r.status_code}), retry {attempts}/{retry}"
-                time_mod.sleep(backoff * attempts)
+                delay = backoff * (2 ** (attempts - 1)) + random.uniform(0, backoff)
+                delay = min(delay, max(0, max_page_retry_s - (time_mod.monotonic() - page_start)))
+                time_mod.sleep(max(0, delay))
                 continue
 
+            # --- unrecoverable error ---
             last_error = f"Langfuse error on page {page} (status {r.status_code}): {text_preview[:500]}"
             break
 
         if last_error:
+            fetch_complete = False
             if isinstance(debug_out, dict):
                 debug_out["stopped_early_reason"] = last_error
                 debug_out["final_page_size"] = int(limit)
@@ -619,6 +699,8 @@ def fetch_traces_window(
                 page_entry["items_returned"] = len(batch)
             debug_out["pages"].append(page_entry)
 
+        # --- collect traces, respecting budget ---
+        new_in_page: list[dict[str, Any]] = []
         for it in batch:
             if not isinstance(it, dict):
                 continue
@@ -627,18 +709,36 @@ def fetch_traces_window(
                 continue
             if isinstance(_id, str):
                 seen_ids.add(_id)
-            rows.append(it)
-            if len(rows) >= max_traces:
-                break
+            new_in_page.append(it)
+
+        if budget is not None:
+            allowed = budget.consume(len(new_in_page))
+            rows.extend(new_in_page[:allowed])
+        else:
+            for it in new_in_page:
+                rows.append(it)
+                if len(rows) >= max_traces:
+                    break
+
+        # --- progress callback ---
+        if callable(on_progress):
+            try:
+                on_progress(page, len(rows))
+            except Exception:
+                pass
 
         if len(batch) < limit:
             break
 
         page += 1
-        time_mod.sleep(0.01)
+        # Small inter-page sleep (only if no rate limiter — the limiter already paces)
+        if rate_limiter is None:
+            time_mod.sleep(0.01)
 
     if isinstance(debug_out, dict):
-        if len(rows) >= max_traces:
+        traces_at_limit = (budget.exhausted() if budget is not None else len(rows) >= max_traces)
+        if traces_at_limit:
+            fetch_complete = False
             debug_out["stopped_due_to_max_traces"] = True
             if not debug_out.get("stopped_early_reason"):
                 debug_out["stopped_early_reason"] = f"Hit max_traces limit ({int(max_traces):,})"
@@ -653,15 +753,17 @@ def fetch_traces_window(
             ended_on_full_page = False
 
         if hit_page_limit and ended_on_full_page:
+            fetch_complete = False
             debug_out["stopped_due_to_page_limit"] = True
             if not debug_out.get("stopped_early_reason"):
                 debug_out["stopped_early_reason"] = f"Hit page_limit ({int(page_limit)})"
 
     if use_disk_cache:
-        _try_write_cache(cache_path, rows)
+        _try_write_cache(cache_path, {"version": 2, "complete": fetch_complete, "data": rows})
         if isinstance(debug_out, dict):
             debug_out["cache_hit"] = False
             debug_out["cache_path"] = str(cache_path)
+            debug_out["cache_complete"] = fetch_complete
 
     return rows
 
