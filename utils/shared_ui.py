@@ -321,8 +321,6 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             else:
                 st.button("⬇️ Download csv", disabled=True, width="stretch")
 
-        fetch_status = st.empty()
-
         fetch_warn = st.session_state.get("fetch_warning")
         if isinstance(fetch_warn, dict) and str(fetch_warn.get("message") or "").strip():
             st.warning(str(fetch_warn.get("message") or ""))
@@ -515,6 +513,14 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
             stats_page_size=int(stats_page_size),
         )
 
+    # Fetch status placeholder — in main content area so progress is visible
+    fetch_status = st.empty()
+
+    # Show last fetch summary (survives rerun)
+    last_fetch_summary = st.session_state.get("_last_fetch_summary")
+    if isinstance(last_fetch_summary, str) and last_fetch_summary.strip():
+        st.success(last_fetch_summary)
+
     # Handle fetch (outside the sidebar layout, but still within this function)
     if fetch_clicked:
         _handle_fetch(
@@ -554,6 +560,8 @@ def _handle_fetch(
     fetch_status: Any,
 ) -> None:
     """Handle the fetch traces button click."""
+    st.session_state._last_fetch_summary = None  # clear stale summary
+
     if not public_key or not secret_key or not base_url:
         st.error("Missing LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL")
         return
@@ -877,12 +885,11 @@ def _fetch_chunked(
         fetch_debug["total_traces"] = len(all_traces)
         elapsed = time_mod.monotonic() - fetch_start
         fail_summary = f" ({failed_count} chunks failed)" if failed_count else ""
-        status.update(
-            label=f"Fetched {len(all_traces):,} traces from {total_chunks} chunks in {elapsed:.1f}s{fail_summary}",
-            state="complete",
-        )
+        summary = f"Fetched {len(all_traces):,} traces from {total_chunks} chunks in {elapsed:.1f}s{fail_summary}"
+        status.update(label=summary, state="complete")
 
     st.session_state.fetch_debug = fetch_debug
+    st.session_state._last_fetch_summary = summary
     return all_traces
 
 
@@ -966,12 +973,11 @@ def _fetch_single(
             on_progress=on_progress,
         )
         elapsed = time_mod.monotonic() - fetch_start
-        status.update(
-            label=f"Fetched {len(traces):,} traces in {elapsed:.1f}s",
-            state="complete",
-        )
+        summary = f"Fetched {len(traces):,} traces in {elapsed:.1f}s"
+        status.update(label=summary, state="complete")
 
     st.session_state.fetch_debug = fetch_debug
+    st.session_state._last_fetch_summary = summary
     return traces
 
 
