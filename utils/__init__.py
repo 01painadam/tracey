@@ -46,6 +46,21 @@ from utils.data_helpers import (
     normalize_prompt,
     safe_quantile,
 )
+from utils.enrichment_schema import (
+    TraceEnrichment,
+    TraceEnrichmentWithId,
+    BatchEnrichmentResponse,
+    enrichment_json_schema,
+    batch_enrichment_json_schema,
+    validate_enrichment,
+    validate_batch_enrichment,
+    coerce_enrichment,
+    is_welcome_prompt,
+    load_starter_prompts,
+    load_dataset_catalog,
+    dataset_catalog_keywords,
+    dataset_catalog_summary,
+)
 from utils.llm_helpers import (
     get_gemini_model_options,
     chunked,
@@ -53,6 +68,8 @@ from utils.llm_helpers import (
     parse_json_any,
     parse_json_dict,
     call_gemini,
+    call_gemini_structured,
+    model_aware_batch_size,
 )
 from utils.shared_ui import (
     check_authentication,
@@ -140,6 +157,20 @@ __all__ = [
     "format_report_date",
     "normalize_prompt",
     "safe_quantile",
+    # Enrichment schema
+    "TraceEnrichment",
+    "TraceEnrichmentWithId",
+    "BatchEnrichmentResponse",
+    "enrichment_json_schema",
+    "batch_enrichment_json_schema",
+    "validate_enrichment",
+    "validate_batch_enrichment",
+    "coerce_enrichment",
+    "is_welcome_prompt",
+    "load_starter_prompts",
+    "load_dataset_catalog",
+    "dataset_catalog_keywords",
+    "dataset_catalog_summary",
     # LLM helpers
     "get_gemini_model_options",
     "chunked",
@@ -147,6 +178,8 @@ __all__ = [
     "parse_json_any",
     "parse_json_dict",
     "call_gemini",
+    "call_gemini_structured",
+    "model_aware_batch_size",
     # Charts
     "daily_volume_chart",
     "daily_outcome_chart",

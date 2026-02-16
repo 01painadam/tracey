@@ -122,3 +122,101 @@ def call_gemini(api_key: str, model_name: str, prompt: str) -> str:
         return str(getattr(resp, "text", "") or "")
     except Exception:
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Model-aware batch sizing
+# ---------------------------------------------------------------------------
+
+# Models with large output token limits (65K+) can handle bigger batches.
+# Models with 8K output limits need smaller batches.
+_LARGE_OUTPUT_MODELS = {"gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"}
+_DEFAULT_BATCH_SIZE_LARGE = 50  # for 65K output models
+_DEFAULT_BATCH_SIZE_SMALL = 25  # for 8K output models
+
+
+def model_aware_batch_size(model_name: str, user_batch_size: int | None = None) -> int:
+    """Return an appropriate batch size for the given model.
+
+    If *user_batch_size* is provided and positive, it is used as an upper bound
+    but capped to the model's safe maximum.
+    """
+    # Determine model tier
+    is_large = any(model_name.startswith(prefix) for prefix in _LARGE_OUTPUT_MODELS)
+    safe_max = _DEFAULT_BATCH_SIZE_LARGE if is_large else _DEFAULT_BATCH_SIZE_SMALL
+
+    if user_batch_size is not None and user_batch_size > 0:
+        return min(int(user_batch_size), safe_max)
+    return safe_max
+
+
+# ---------------------------------------------------------------------------
+# Structured output (JSON mode with schema)
+# ---------------------------------------------------------------------------
+
+
+def call_gemini_structured(
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    *,
+    response_schema: Any = None,
+    system_instruction: str | None = None,
+    temperature: float | None = None,
+) -> dict[str, Any] | list[Any] | None:
+    """Call Gemini with JSON mode and optional response schema.
+
+    Uses ``GenerateContentConfig`` with ``response_mime_type="application/json"``
+    so the model is forced to return valid JSON.  When *response_schema* is
+    provided (a Pydantic model class, dict, or ``google.genai.types.Schema``),
+    the output is further constrained to match that schema.
+
+    Args:
+        api_key: Google API key.
+        model_name: Gemini model name.
+        prompt: User prompt text.
+        response_schema: Optional schema for structured output.
+        system_instruction: Optional system instruction prepended to the request.
+        temperature: Optional sampling temperature.
+
+    Returns:
+        Parsed JSON (dict or list) on success, ``None`` on error.
+    """
+    try:
+        from google import genai as _genai
+        from google.genai import types as _types
+
+        client = _genai.Client(api_key=api_key)
+
+        config_kwargs: dict[str, Any] = {
+            "response_mime_type": "application/json",
+        }
+        if response_schema is not None:
+            config_kwargs["response_schema"] = response_schema
+        if system_instruction is not None:
+            config_kwargs["system_instruction"] = system_instruction
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+
+        config = _types.GenerateContentConfig(**config_kwargs)
+
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=config,
+        )
+
+        raw = str(getattr(resp, "text", "") or "").strip()
+        if not raw:
+            return None
+
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Model returned non-JSON despite json mode — try strip_code_fences
+        try:
+            cleaned = strip_code_fences(raw).strip()
+            return json.loads(cleaned) if cleaned else None
+        except Exception:
+            return None
+    except Exception:
+        return None
