@@ -94,6 +94,19 @@ def render(
     st.caption(" | ".join(context_parts))
 
     kpis = summary.get("kpis", {})
+    gq = summary.get("global_quality", {})
+
+    scored_n = int(gq.get("scored_intents_count") or 0)
+    threads_n = int(gq.get("threads_total") or 0)
+    delta_map = {
+        "complete_answer_rate_scored_intents": f"{int(gq.get('scored_intents_complete_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "needs_user_input_rate_scored_intents": f"{int(gq.get('scored_intents_needs_user_input_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "error_rate_scored_intents": f"{int(gq.get('scored_intents_error_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "citations_shown_rate_scored_intents": f"{int(gq.get('scored_intents_citations_shown_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "global_dataset_identifiable_rate_scored_intents": f"{int(gq.get('scored_intents_dataset_identifiable_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "citation_metadata_present_rate_scored_intents": f"{int(gq.get('scored_intents_citation_metadata_present_count') or 0)}/{scored_n}" if scored_n else "0/0",
+        "threads_ended_after_needs_user_input_rate": f"{int(gq.get('threads_ended_after_needs_user_input') or 0)}/{threads_n}" if threads_n else "0/0",
+    }
     cols = st.columns(4)
     primary_metric_keys = [
         ("Complete (scored)", "complete_answer_rate_scored_intents"),
@@ -107,6 +120,7 @@ def render(
                 label,
                 _pct_str(kpis.get(key, 0.0)),
                 metric_id=key,
+                delta=delta_map.get(key),
                 key=f"content_kpis_{key}",
             )
 
@@ -125,10 +139,10 @@ def render(
                     label,
                     _pct_str(kpis.get(key, 0.0)),
                     metric_id=key,
+                    delta=delta_map.get(key),
                     key=f"content_kpis_{key}",
                 )
 
-    gq = summary.get("global_quality", {})
     c1, c2, c3 = st.columns(3)
 
     completion_df = pd.DataFrame(

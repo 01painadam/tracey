@@ -1437,21 +1437,26 @@ def _pct(n: float, d: float) -> float:
 def compute_thread_key(df: pd.DataFrame) -> pd.Series:
     """Build deterministic thread grouping keys with fallback priority.
 
-    Priority: thread_id -> sessionId -> trace_id -> synthetic row key.
+    Priority: thread_id -> sessionId/session_id -> trace_id -> synthetic row key.
+
+    Notes:
+        - Different exports/enrichments use different column conventions (camelCase vs snake_case).
+        - This helper intentionally supports both to keep thread counts consistent across tabs.
     """
     if df.empty:
         return pd.Series(dtype="string")
 
     idx_series = pd.Series(df.index, index=df.index)
 
-    def _col(name: str) -> pd.Series:
-        if name in df.columns:
-            return df[name].fillna("").astype(str).str.strip()
+    def _col_any(names: list[str]) -> pd.Series:
+        for name in names:
+            if name in df.columns:
+                return df[name].fillna("").astype(str).str.strip()
         return pd.Series("", index=df.index, dtype="string")
 
-    thread_id = _col("thread_id")
-    session_id = _col("sessionId")
-    trace_id = _col("trace_id")
+    thread_id = _col_any(["thread_id", "threadId"])
+    session_id = _col_any(["sessionId", "session_id"])
+    trace_id = _col_any(["trace_id", "traceId", "id"])
 
     thread_key = thread_id.where(thread_id != "", session_id)
     thread_key = thread_key.where(thread_key != "", trace_id)
@@ -1656,6 +1661,19 @@ def summarize_content(derived: pd.DataFrame, timestamp_col: str = "timestamp") -
         "codeact_present_rate_scored_intents": _pct(scored["codeact_present"].fillna(False).sum(), len(scored)),
         "threads_ended_after_needs_user_input_rate": _pct(ended_nui, total_threads),
         "threads_ended_after_error_rate": _pct(ended_err, total_threads),
+        # Denominators / counts for interpreting the headline rates
+        "scored_intents_count": int(len(scored)),
+        "scored_intents_complete_count": int((scored["completion_state"] == "complete_answer").sum()) if len(scored) else 0,
+        "scored_intents_needs_user_input_count": int((scored["completion_state"] == "needs_user_input").sum()) if len(scored) else 0,
+        "scored_intents_error_count": int((scored["completion_state"] == "error").sum()) if len(scored) else 0,
+        "scored_intents_citations_shown_count": int(scored["citations_text"].fillna(False).sum()) if len(scored) else 0,
+        "scored_intents_dataset_identifiable_count": int(scored["dataset_struct"].fillna(False).sum()) if len(scored) else 0,
+        "scored_intents_citation_metadata_present_count": int(
+            (scored["citations_struct"].fillna(False) | scored["dataset_has_citation"].fillna(False)).sum()
+        ) if len(scored) else 0,
+        "threads_total": int(total_threads),
+        "threads_ended_after_needs_user_input": int(ended_nui),
+        "threads_ended_after_error": int(ended_err),
     }
 
     kpis = {

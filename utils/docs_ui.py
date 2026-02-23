@@ -10,6 +10,8 @@ All *content* lives in :mod:`utils.metrics_registry`.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -18,10 +20,29 @@ import streamlit as st
 from utils.metrics_registry import METRICS, PAGES
 
 
-# IMPORTANT: Keep this path in sync with the actual glossary page filename.
+def _resolve_glossary_page_path() -> str:
+    """Best-effort resolution for the Metrics Glossary page path.
+
+    The repository includes hashed page filenames (e.g. `0_#L01f4da_Metrics_Glossary.py`).
+    Hard-coding is brittle, so we look for the file by pattern.
+    """
+
+    try:
+        repo_root = Path(__file__).resolve().parents[1]
+        pages_dir = repo_root / "pages"
+        candidates = sorted(pages_dir.glob("*Metrics_Glossary*.py"))
+        if candidates:
+            return str(candidates[0].relative_to(repo_root)).replace("\\", "/")
+    except Exception:
+        pass
+
+    # Fallback to the most common name in this repo.
+    return "pages/0_#L01f4da_Metrics_Glossary.py"
+
+
 # This is used by `st.page_link` / `st.switch_page` so users can jump from
 # inline help to the full glossary (with deep-linking via query params).
-GLOSSARY_PAGE_PATH = "pages/0_📚_Metrics_Glossary.py"
+GLOSSARY_PAGE_PATH = _resolve_glossary_page_path()
 
 
 def _supports_popover() -> bool:
@@ -361,10 +382,52 @@ def render_metrics_glossary_page() -> None:
 
     # Exports
     st.markdown("### Export")
-    json_bytes = view.to_json(orient="records", indent=2).encode("utf-8")
+
+    export_metric_ids = view["metric_id"].tolist()
+    export_metrics = {mid: METRICS[mid] for mid in export_metric_ids if mid in METRICS}
+    export_payload = {
+        "metrics": export_metrics,
+        "pages": PAGES,
+    }
+
+    full_json_bytes = json.dumps(export_payload, indent=2, sort_keys=True).encode("utf-8")
     st.download_button(
-        "Download filtered glossary as JSON",
-        data=json_bytes,
-        file_name="tracey_metrics_glossary.json",
+        "Download glossary registry (JSON)",
+        data=full_json_bytes,
+        file_name="tracey_metrics_registry.json",
         mime="application/json",
+        help="Includes full metric definitions for the currently filtered metric set plus all page docs.",
+    )
+
+    # Flat CSV export for easy review in spreadsheets
+    flat_rows: list[dict[str, Any]] = []
+    for mid in export_metric_ids:
+        doc = METRICS.get(mid) or {}
+        flat_rows.append(
+            {
+                "metric_id": mid,
+                "name": doc.get("name", mid),
+                "category": doc.get("category", ""),
+                "definition": doc.get("definition", ""),
+                "formula": doc.get("formula", ""),
+                "provenance": doc.get("provenance", ""),
+                "population": doc.get("population", ""),
+                "numerator": doc.get("numerator", ""),
+                "denominator": doc.get("denominator", ""),
+                "unit": doc.get("unit", ""),
+                "method": doc.get("method", ""),
+                "used_in": ", ".join(doc.get("used_in") or []),
+                "code_refs": ", ".join(doc.get("code_refs") or []),
+                "caveats": " | ".join(doc.get("caveats") or []),
+            }
+        )
+
+    flat_df = pd.DataFrame(flat_rows)
+    csv_bytes = flat_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download glossary registry (CSV)",
+        data=csv_bytes,
+        file_name="tracey_metrics_registry.csv",
+        mime="text/csv",
+        help="Flat, spreadsheet-friendly export of the currently filtered metric set.",
     )
