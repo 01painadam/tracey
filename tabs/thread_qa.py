@@ -123,16 +123,14 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
             "Many datasets (>= 3)",
         ],
     )
-    search = st.text_input("Search (sessionId / dataset family / needs reason)", "")
+    search = st.text_input("Search (sessionId / dataset / needs reason)", "")
 
     with st.expander("Advanced filters", expanded=False):
         only_ended_nui = st.checkbox("Only threads that ended after needs_user_input", value=False)
         only_ended_err = st.checkbox("Only threads that ended after error", value=False)
         only_no_complete = st.checkbox("Only threads with no complete answers", value=False)
         needs_options = _split_csv_values(thread_df.get("needs_user_input_reasons", pd.Series(dtype=str)))
-        family_options = _split_csv_values(thread_df.get("dataset_families_seen", pd.Series(dtype=str)))
         selected_needs = st.multiselect("Needs reasons", options=needs_options)
-        selected_families = st.multiselect("Dataset families", options=family_options)
         min_turns_opt = st.selectbox("Min turns", options=["All", "1+", "2+", "3+", "5+"], index=0)
 
     filtered = thread_df.copy()
@@ -157,7 +155,7 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
         search_lower = search.strip().lower()
         search_cols = [
             c
-            for c in ["sessionId", "datasets_seen", "dataset_families_seen", "needs_user_input_reasons"]
+            for c in ["sessionId", "datasets_seen", "needs_user_input_reasons"]
             if c in filtered.columns
         ]
         if search_cols:
@@ -183,13 +181,6 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
                 lambda v: any(r in {p.strip() for p in str(v).split(",") if p.strip()} for r in selected_needs)
             )
         ]
-    if selected_families:
-        filtered = filtered[
-            filtered["dataset_families_seen"].fillna("").apply(
-                lambda v: any(r in {p.strip() for p in str(v).split(",") if p.strip()} for r in selected_families)
-            )
-        ]
-
     min_turns_map = {"All": 0, "1+": 1, "2+": 2, "3+": 3, "5+": 5}
     if min_turns_map[min_turns_opt] > 0:
         filtered = filtered[filtered["n_turns"] >= min_turns_map[min_turns_opt]]
@@ -206,13 +197,9 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
         "ended_after_needs_user_input",
         "ended_after_error",
         "datasets_seen_count",
-        "dataset_families_seen",
         "sessionId",
         "url",
     ]
-    if "dataset_families_seen" not in display_df.columns and "dataset_families_seen_count" in display_df.columns:
-        compact_columns.insert(compact_columns.index("sessionId"), "dataset_families_seen_count")
-
     show_advanced = st.checkbox("Show advanced columns", value=False)
     advanced_columns = [
         "first_intent_primary",
@@ -221,7 +208,6 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
         "ever_needs_user_input",
         "ever_error",
         "datasets_seen",
-        "dataset_families_seen_count",
         "needs_user_input_reasons",
     ]
     columns = compact_columns + (advanced_columns if show_advanced else [])
@@ -277,7 +263,6 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
             "completion_state",
             "needs_user_input_reason",
             "struct_fail_reason",
-            "dataset_family",
             "dataset_name",
             "answer_type",
             "codeact_present",

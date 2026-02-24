@@ -49,7 +49,6 @@ CODEACT_GLOSSARY = {
 COMPACT_INBOX_COLUMNS = [
     "timestamp",
     "completion_state",
-    "dataset_family",
     "dataset_name",
     "aoi_name",
     "time_start",
@@ -162,7 +161,7 @@ def _apply_search(df: pd.DataFrame, search: str) -> pd.DataFrame:
     query = (search or "").strip().lower()
     if not query:
         return df
-    columns = [c for c in ["aoi_name", "dataset_name", "dataset_family", "prompt", "response", "sessionId", "trace_id"] if c in df.columns]
+    columns = [c for c in ["aoi_name", "dataset_name", "prompt", "response", "sessionId", "trace_id"] if c in df.columns]
     if not columns:
         return df
     text_blob = pd.Series([""] * len(df), index=df.index, dtype=str)
@@ -221,10 +220,9 @@ def _render_inbox_table(df: pd.DataFrame) -> None:
 
 def _trace_option_label(row: pd.Series) -> str:
     timestamp = str(row.get("timestamp") or "").strip() or "unknown-time"
-    family = str(row.get("dataset_family") or "").strip() or "unknown-family"
     aoi = str(row.get("aoi_name") or "").strip() or "unknown-aoi"
     reason = str(row.get("review_reason") or "").strip() or "no_reason"
-    return f"{timestamp} • {family} • {aoi} • {reason}"
+    return f"{timestamp} • {aoi} • {reason}"
 
 
 def render(base_thread_url: str) -> None:
@@ -284,18 +282,6 @@ def render(base_thread_url: str) -> None:
         help="Substring search across AOI name, dataset fields, and prompt/response text when available.",
     )
     filtered = _apply_search(filtered, search)
-
-    with st.expander("Optional filters", expanded=False):
-        if "dataset_family" in filtered.columns:
-            family_options = sorted({str(v) for v in filtered["dataset_family"].fillna("") if str(v).strip()})
-            selected_families = st.multiselect(
-                "Dataset family",
-                options=family_options,
-                default=[],
-                help="High-level grouping of dataset_name (e.g., tree_cover_loss, alerts).",
-            )
-            if selected_families:
-                filtered = filtered[filtered["dataset_family"].astype(str).isin(selected_families)]
 
     st.caption(f"{len(filtered):,} CodeAct traces match this view")
     _render_inbox_table(filtered)

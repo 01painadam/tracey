@@ -122,7 +122,6 @@ def render(public_key: str, secret_key: str, base_url: str, base_thread_url: str
         "intent_primary",
         "completion_state",
         "struct_fail_reason",
-        "dataset_family",
         "dataset_name",
         "aoi_name",
         "time_start",

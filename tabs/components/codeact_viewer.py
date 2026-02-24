@@ -139,7 +139,6 @@ def render_codeact_trace_viewer(
         if thread_link:
             st.link_button("Open thread", thread_link)
         st.write(f"dataset_name: `{_to_str(row.get('dataset_name'))}`")
-        st.write(f"dataset_family: `{_to_str(row.get('dataset_family'))}`")
         st.write(f"aoi_name: `{_to_str(row.get('aoi_name'))}`")
         st.write(f"time_start: `{_to_str(row.get('time_start'))}`")
         st.write(f"time_end: `{_to_str(row.get('time_end'))}`")

@@ -129,7 +129,6 @@ def render(base_thread_url: str) -> None:
             opts = sorted({str(x) for x in filtered.get(col, pd.Series(dtype=str)).fillna("") if str(x).strip()})
             return st.multiselect(label, opts)
 
-        dataset_families = _ms("dataset_family", "dataset_family")
         dataset_names = _ms("dataset_name", "dataset_name")
         intents = _ms("intent_primary", "intent_primary")
         prep_modes = _ms("codeact_chart_prep_mode", "codeact_chart_prep_mode")
@@ -147,8 +146,6 @@ def render(base_thread_url: str) -> None:
         selected_flags = st.multiselect("flags", available_flags)
         only_issues = st.checkbox("Only consistency issues", value=False)
 
-        if dataset_families:
-            filtered = filtered[filtered["dataset_family"].astype(str).isin(dataset_families)]
         if dataset_names:
             filtered = filtered[filtered["dataset_name"].astype(str).isin(dataset_names)]
         if intents:
@@ -188,7 +185,6 @@ def render(base_thread_url: str) -> None:
             "thread_url",
             "intent_primary",
             "dataset_name",
-            "dataset_family",
             "codeact_template_id",
             "codeact_retrieval_mode",
             "codeact_chart_prep_mode",

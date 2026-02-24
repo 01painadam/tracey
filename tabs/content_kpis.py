@@ -172,20 +172,12 @@ def render(
         )
 
     intent_summary = pd.DataFrame.from_dict(summary.get("intent_summary", {}), orient="index").reset_index().rename(columns={"index": "intent_primary"})
-    dataset_summary = pd.DataFrame.from_dict(summary.get("dataset_family_summary", {}), orient="index").reset_index().rename(columns={"index": "dataset_family"})
-    if not dataset_summary.empty and "count_data_intents" in dataset_summary.columns:
-        dataset_summary = dataset_summary.sort_values("count_data_intents", ascending=False)
-
     with st.expander("Details (tables)", expanded=False):
         show_full = st.checkbox("Show full table", value=False)
 
         st.subheader("Intent summary")
         intent_display = intent_summary if show_full else intent_summary.head(15)
         st.dataframe(intent_display, use_container_width=True)
-
-        st.subheader("Dataset family summary")
-        dataset_display = dataset_summary if show_full else dataset_summary.head(15)
-        st.dataframe(dataset_display, use_container_width=True)
 
         st.subheader("Content slices")
         st.dataframe(slices, use_container_width=True)
@@ -206,15 +198,13 @@ def render(
     search = st.text_input("Search (dataset / AOI / prompt / response / sessionId / trace_id)", "")
 
     with st.expander("Advanced filters", expanded=False):
-        f1, f2, f3, f4 = st.columns(4)
+        f1, f2, f3 = st.columns(3)
         iopts = ["All"] + sorted(x for x in derived["intent_primary"].dropna().astype(str).unique())
         copts = ["All"] + sorted(x for x in derived["completion_state"].dropna().astype(str).unique())
         ropts = ["All"] + sorted(x for x in derived["needs_user_input_reason"].dropna().astype(str).unique() if x)
-        dopts = ["All"] + sorted(x for x in derived["dataset_family"].dropna().astype(str).unique())
         intent_filter = f1.selectbox("intent_primary", iopts)
         completion_filter = f2.selectbox("completion_state", copts)
         reason_filter = f3.selectbox("needs_user_input_reason", ropts)
-        family_filter = f4.selectbox("dataset_family", dopts)
 
     view = derived.copy()
     if preset == "Needs user input" and "completion_state" in view.columns:
@@ -246,7 +236,6 @@ def render(
             "prompt",
             "response",
             "dataset_name",
-            "dataset_family",
             "aoi_name",
             "sessionId",
             "trace_id",
@@ -264,9 +253,6 @@ def render(
         view = view[view["completion_state"] == completion_filter]
     if reason_filter != "All":
         view = view[view["needs_user_input_reason"] == reason_filter]
-    if family_filter != "All":
-        view = view[view["dataset_family"] == family_filter]
-
     view = view.copy()
     if "prompt" in view.columns:
         view["prompt"] = view["prompt"].map(_truncate)
@@ -281,7 +267,7 @@ def render(
     cols_to_show = [
         "timestamp", "trace_id", "sessionId", "thread_id", "userId",
         "intent_primary", "completion_state", "needs_user_input_reason", "struct_fail_reason",
-        "dataset_name", "dataset_family", "aoi_name", "time_start", "time_end",
+        "dataset_name", "aoi_name", "time_start", "time_end",
         "prompt", "response", "link",
     ]
     cols_to_show = [c for c in cols_to_show if c in view.columns]
