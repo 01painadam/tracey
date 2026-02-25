@@ -23,6 +23,7 @@ from utils.langfuse_api import (
     fetch_projects,
     create_score,
     delete_score,
+    clear_langfuse_disk_cache,
 )
 from utils.trace_parsing import (
     normalize_trace_format,
@@ -31,6 +32,10 @@ from utils.trace_parsing import (
     final_ai_message,
     active_turn_prompt,
     active_turn_answer,
+    current_human_prompt,
+    current_turn_ai_message,
+    current_turn_prompt_answer,
+    slice_output_to_current_turn,
     classify_outcome,
     extract_trace_context,
     extract_tool_calls_and_results,
@@ -140,6 +145,7 @@ __all__ = [
     "fetch_projects",
     "create_score",
     "delete_score",
+    "clear_langfuse_disk_cache",
     # Trace parsing
     "normalize_trace_format",
     "parse_trace_dt",
@@ -147,6 +153,10 @@ __all__ = [
     "final_ai_message",
     "active_turn_prompt",
     "active_turn_answer",
+    "current_human_prompt",
+    "current_turn_ai_message",
+    "current_turn_prompt_answer",
+    "slice_output_to_current_turn",
     "classify_outcome",
     "extract_trace_context",
     "extract_tool_calls_and_results",

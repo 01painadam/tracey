@@ -7,6 +7,34 @@ from typing import Any
 from pathlib import Path
 from urllib.parse import urlparse
 
+def _is_nan(v: Any) -> bool:
+    try:
+        return isinstance(v, float) and v != v
+    except Exception:
+        return False
+
+
+def _as_dict(v: Any) -> dict[str, Any]:
+    """Coerce common Langfuse CSV/DF cell values into a dict.
+
+    Handles NaN, None, JSON strings, and already-dict inputs.
+    """
+    if v is None or _is_nan(v):
+        return {}
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return {}
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 
 _DEFAULT_ERROR_ANSWER_NEEDLES = [
     "error",
@@ -55,6 +83,8 @@ def _load_error_answer_needles() -> list[str]:
 def normalize_trace_format(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize a trace row by parsing JSON fields."""
     def parse_json_field(value: Any) -> Any:
+        if _is_nan(value):
+            return None
         if isinstance(value, str):
             try:
                 parsed = json.loads(value)
@@ -101,18 +131,32 @@ def parse_trace_dt(row: dict[str, Any]) -> datetime | None:
 
 
 def _msg_text(content: Any) -> str:
-    """Extract text from message content (string or list of content blocks)."""
+    """Extract text from message content (string, dict, or list of content blocks)."""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        if "text" in content and isinstance(content.get("text"), str):
+            return str(content.get("text") or "")
+        if "content" in content and isinstance(content.get("content"), str):
+            return str(content.get("content") or "")
+        # Best-effort fallback for unknown structured content
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except Exception:
+            return ""
     if isinstance(content, list):
         out: list[str] = []
         for c in content:
+            if isinstance(c, str):
+                if c.strip():
+                    out.append(c)
+                continue
             if isinstance(c, dict):
-                if "text" in c and isinstance(c["text"], str):
-                    out.append(c["text"])
-                elif "content" in c and isinstance(c["content"], str):
-                    out.append(c["content"])
-        return "\n".join(out)
+                if "text" in c and isinstance(c.get("text"), str):
+                    out.append(c.get("text") or "")
+                elif "content" in c and isinstance(c.get("content"), str):
+                    out.append(c.get("content") or "")
+        return "\n".join([x for x in out if isinstance(x, str)])
     return ""
 
 
@@ -221,9 +265,12 @@ def _find_active_turn_window(msgs: list[dict[str, Any]]) -> tuple[int | None, in
 
 def first_human_prompt(row: dict[str, Any]) -> str:
     """Extract the first human message from a trace's input."""
-    msgs = (((row.get("input") or {}).get("messages")) or [])
+    input_obj = _as_dict(row.get("input"))
+    msgs = (input_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return ""
     for m in msgs:
-        if isinstance(m, dict) and m.get("type") == "human":
+        if isinstance(m, dict) and _mtype(m) == "human":
             t = _msg_text(m.get("content"))
             if t and t.strip():
                 return t.strip()
@@ -231,7 +278,10 @@ def first_human_prompt(row: dict[str, Any]) -> str:
 
 
 def active_turn_prompt(row: dict[str, Any]) -> str:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return ""
     start_idx, _ = _find_active_turn_window([m for m in msgs if isinstance(m, dict)])
     if start_idx is None or not (0 <= start_idx < len(msgs)):
         return ""
@@ -244,17 +294,97 @@ def active_turn_prompt(row: dict[str, Any]) -> str:
 
 def final_ai_message(row: dict[str, Any]) -> str:
     """Extract the final AI message from a trace's output."""
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return ""
     for m in reversed(msgs):
-        if isinstance(m, dict) and m.get("type") == "ai":
+        if isinstance(m, dict) and _mtype(m) == "ai":
             t = _msg_text(m.get("content"))
             if t and t.strip():
                 return t.strip()
     return ""
 
 
+def current_human_prompt(row: dict[str, Any]) -> str:
+    """Extract the current (last) human/user message from a trace input."""
+    input_obj = _as_dict(row.get("input"))
+    msgs = (input_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return ""
+    for m in reversed(msgs):
+        if isinstance(m, dict) and _mtype(m) == "human":
+            t = _msg_text(m.get("content"))
+            if t and t.strip():
+                return t.strip()
+    return ""
+
+
+def slice_output_to_current_turn(trace: dict[str, Any], output_msgs: list[Any] | None = None) -> list[Any]:
+    """Slice output.messages to the current turn.
+
+    Uses active-turn markers when available; otherwise falls back to current prompt matching.
+    """
+    msgs = output_msgs
+    if msgs is None:
+        output_obj = _as_dict(trace.get("output"))
+        msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return []
+
+    clean_msgs: list[dict[str, Any]] = [m for m in msgs if isinstance(m, dict)]
+
+    start_idx, end_idx = _find_active_turn_window(clean_msgs)
+    if start_idx is not None and 0 <= start_idx < len(clean_msgs):
+        hi = end_idx if end_idx is not None and 0 <= end_idx < len(clean_msgs) else (len(clean_msgs) - 1)
+        return clean_msgs[start_idx : hi + 1]
+
+    cur_prompt = current_human_prompt(trace)
+    if not cur_prompt:
+        return clean_msgs
+
+    start_idx2: int | None = None
+    for i, m in enumerate(clean_msgs):
+        if _mtype(m) != "human":
+            continue
+        text = _msg_text(m.get("content")).strip()
+        if text == cur_prompt.strip():
+            start_idx2 = i
+
+    if start_idx2 is None:
+        return clean_msgs
+    return clean_msgs[start_idx2:]
+
+
+def current_turn_ai_message(row: dict[str, Any]) -> str:
+    """Extract assistant response scoped to the current turn only."""
+    out_msgs = slice_output_to_current_turn(row)
+    if isinstance(out_msgs, list):
+        for m in reversed(out_msgs):
+            if isinstance(m, dict) and _mtype(m) == "ai":
+                t = _msg_text(m.get("content"))
+                if t and t.strip():
+                    return t.strip()
+
+    output = _as_dict(row.get("output"))
+    if output:
+        for k in ["response", "answer", "final", "text"]:
+            v = output.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return ""
+
+
+def current_turn_prompt_answer(row: dict[str, Any]) -> tuple[str, str]:
+    """Get current prompt/answer pair for a trace."""
+    return current_human_prompt(row), current_turn_ai_message(row)
+
+
 def active_turn_answer(row: dict[str, Any]) -> str:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return ""
     clean_msgs = [m for m in msgs if isinstance(m, dict)]
     _, end_idx = _find_active_turn_window(clean_msgs)
     if end_idx is None or not (0 <= end_idx < len(clean_msgs)):
@@ -267,12 +397,18 @@ def active_turn_answer(row: dict[str, Any]) -> str:
 
 
 def trace_has_ai_message(row: dict[str, Any]) -> bool:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
-    return any(isinstance(m, dict) and m.get("type") == "ai" for m in msgs)
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return False
+    return any(isinstance(m, dict) and _mtype(m) == "ai" for m in msgs)
 
 
 def active_turn_has_ai_message(row: dict[str, Any]) -> bool:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return False
     clean_msgs = [m for m in msgs if isinstance(m, dict)]
     start_idx, end_idx = _find_active_turn_window(clean_msgs)
     if start_idx is None:
@@ -300,7 +436,10 @@ def _message_has_error_status(m: dict[str, Any]) -> bool:
 
 
 def active_turn_has_hard_error(row: dict[str, Any]) -> bool:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return False
     clean_msgs = [m for m in msgs if isinstance(m, dict)]
     start_idx, end_idx = _find_active_turn_window(clean_msgs)
     if start_idx is None:
@@ -337,7 +476,10 @@ def looks_like_error_answer(text: str) -> bool:
 
 
 def active_turn_used_tools(row: dict[str, Any]) -> bool:
-    msgs = (((row.get("output") or {}).get("messages")) or [])
+    output_obj = _as_dict(row.get("output"))
+    msgs = (output_obj.get("messages") or [])
+    if not isinstance(msgs, list):
+        return False
     clean_msgs = [m for m in msgs if isinstance(m, dict)]
     start_idx, end_idx = _find_active_turn_window(clean_msgs)
     if start_idx is None:
@@ -357,8 +499,11 @@ def active_turn_used_tools(row: dict[str, Any]) -> bool:
 
 def trace_used_tools(row: dict[str, Any]) -> bool:
     """Check if a trace used any tools."""
-    out_msgs = (((row.get("output") or {}).get("messages")) or [])
-    return any(isinstance(m, dict) and m.get("type") == "tool" for m in out_msgs)
+    output_obj = _as_dict(row.get("output"))
+    out_msgs = (output_obj.get("messages") or [])
+    if not isinstance(out_msgs, list):
+        return False
+    return any(isinstance(m, dict) and _mtype(m) == "tool" for m in out_msgs)
 
 
 def classify_outcome(row: dict[str, Any], answer: str) -> str:
@@ -396,7 +541,10 @@ def extract_trace_context(trace: dict[str, Any]) -> dict[str, Any]:
     aoi_name = ""
     aoi_type = ""
 
-    out_msgs = ((trace.get("output") or {}).get("messages") or [])
+    output_obj = _as_dict(trace.get("output"))
+    out_msgs = (output_obj.get("messages") or [])
+    if not isinstance(out_msgs, list):
+        out_msgs = []
     for m in out_msgs:
         if not isinstance(m, dict):
             continue
@@ -544,7 +692,10 @@ def extract_tool_calls_and_results(trace: dict[str, Any]) -> list[dict[str, Any]
         - output_tokens: int
         - reasoning_tokens: int
     """
-    out_msgs = ((trace.get("output") or {}).get("messages") or [])
+    output_obj = _as_dict(trace.get("output"))
+    out_msgs = (output_obj.get("messages") or [])
+    if not isinstance(out_msgs, list):
+        out_msgs = []
 
     # Build lookup of tool results by tool_call_id
     tool_results: dict[str, dict[str, Any]] = {}
@@ -646,7 +797,10 @@ def extract_usage_metadata(trace: dict[str, Any]) -> dict[str, Any]:
         - reasoning_ratio: float (reasoning / output, or 0 if no output)
         - tool_call_count: int
     """
-    out_msgs = ((trace.get("output") or {}).get("messages") or [])
+    output_obj = _as_dict(trace.get("output"))
+    out_msgs = (output_obj.get("messages") or [])
+    if not isinstance(out_msgs, list):
+        out_msgs = []
 
     total_input = 0
     total_output = 0

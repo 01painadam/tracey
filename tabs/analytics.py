@@ -56,6 +56,10 @@ from utils import (
     UserSegments,
 )
 
+from utils.content_kpis import compute_thread_key
+from utils.trace_parsing import active_turn_used_tools
+from utils.docs_ui import render_page_help, metric_with_help
+
 
 def render(
     base_url: str,
@@ -76,6 +80,8 @@ def render(
         "Explore aggregate volume, outcomes, latency, cost, languages, tool usage, and errors across the currently loaded traces. "
         "Use filters and exports to share a report with others."
     )
+
+    render_page_help("analytics", expanded=False)
 
     st.markdown(
         """
@@ -130,6 +136,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         ctx = extract_trace_context(n)
         usage = extract_usage_metadata(n)
         has_internal_err = trace_has_internal_error(n)
+        used_tools_active = active_turn_used_tools(n)
 
         rows.append(
             {
@@ -148,6 +155,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
                 "aoi_type": ctx.get("aoi_type", ""),
                 "datasets_analysed": ", ".join(ctx.get("datasets_analysed", [])),
                 "tool_call_count": usage.get("tool_call_count", 0),
+                "used_tools_active_turn": bool(used_tools_active),
                 "total_input_tokens": usage.get("total_input_tokens", 0),
                 "total_output_tokens": usage.get("total_output_tokens", 0),
                 "total_reasoning_tokens": usage.get("total_reasoning_tokens", 0),
@@ -159,6 +167,12 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     df = pd.DataFrame(rows)
     if "timestamp" in df.columns:
         df = df.sort_values("timestamp", na_position="last")
+
+    # Thread grouping (used by both Analytics and Conversation Browser)
+    if len(df):
+        df["thread_key"] = compute_thread_key(df)
+    else:
+        df["thread_key"] = pd.Series(dtype="string")
 
     if "timestamp" in df.columns:
         ts_parsed = df["timestamp"].dropna()
@@ -203,7 +217,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         unique_users = int(_users_series.nunique())
     else:
         unique_users = 0
-    unique_threads = int(df["session_id"].dropna().nunique()) if "session_id" in df.columns else 0
+    unique_threads = int(df["thread_key"].dropna().nunique()) if "thread_key" in df.columns else 0
 
     user_first_seen_df: pd.DataFrame | None = None
     has_user_first_seen = False
@@ -251,8 +265,17 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         soft_error_rate = float((df["outcome"] == "SOFT_ERROR").mean())
         error_rate = float((df["outcome"] == "ERROR").mean())
         empty_rate = float((df["outcome"] == "EMPTY").mean())
+        user_visible_error_rate = float((df["outcome"].isin(["ERROR", "EMPTY", "SOFT_ERROR"])).mean())
+        internal_tool_error_rate = float((df["has_internal_error"] == True).mean()) if "has_internal_error" in df.columns else 0.0
+
+        if "used_tools_active_turn" in df.columns and df["used_tools_active_turn"].notna().any():
+            tool_used_mask = df["used_tools_active_turn"] == True
+            tool_failure_rate = float((df.loc[tool_used_mask, "has_internal_error"] == True).mean()) if tool_used_mask.any() else 0.0
+        else:
+            tool_failure_rate = 0.0
     else:
         success_rate = defer_rate = soft_error_rate = error_rate = empty_rate = 0.0
+        user_visible_error_rate = internal_tool_error_rate = tool_failure_rate = 0.0
 
     cost_s = df["total_cost"].dropna() if "total_cost" in df.columns else pd.Series(dtype=float)
     lat_s = df["latency_seconds"].dropna() if "latency_seconds" in df.columns else pd.Series(dtype=float)
@@ -266,6 +289,44 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     st.markdown(
         f"### Summary Statistics ({(end_date - start_date).days + 1} days: {start_date_label} to {end_date_label})"
     )
+
+    # KPI cards (with glossary-backed tooltips)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_with_help("Total traces", f"{total_traces:,}", metric_id="total_traces", key="analytics_total_traces")
+    with c2:
+        metric_with_help("Unique threads", f"{unique_threads:,}", metric_id="unique_threads", key="analytics_unique_threads")
+    with c3:
+        metric_with_help("Unique users", f"{unique_users:,}", metric_id="unique_users", key="analytics_unique_users")
+    with c4:
+        metric_with_help("Success rate", f"{success_rate:.1%}", metric_id="success_rate", key="analytics_success_rate")
+
+    c5, c6, c7, c8, c9 = st.columns(5)
+    with c5:
+        metric_with_help(
+            "User-visible errors",
+            f"{user_visible_error_rate:.1%}",
+            metric_id="user_visible_error_rate",
+            key="analytics_user_visible_error_rate",
+        )
+    with c6:
+        metric_with_help(
+            "Internal tool errors",
+            f"{internal_tool_error_rate:.1%}",
+            metric_id="internal_tool_error_rate",
+            key="analytics_internal_tool_error_rate",
+        )
+    with c7:
+        metric_with_help(
+            "Tool failure rate",
+            f"{tool_failure_rate:.1%}",
+            metric_id="tool_failure_rate",
+            key="analytics_tool_failure_rate",
+        )
+    with c8:
+        metric_with_help("Mean latency", f"{avg_latency:.2f}s", metric_id="mean_latency", key="analytics_mean_latency")
+    with c9:
+        metric_with_help("Mean cost", f"${mean_cost:.4f}", metric_id="mean_cost", key="analytics_mean_cost")
 
     if not has_user_first_seen:
         st.info("Use the sidebar **👥 Fetch users** button to enable New vs Returning user metrics.")
@@ -336,6 +397,9 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 • Soft error rate: {soft_error_rate:.1%}
 • Error rate: {error_rate:.1%}
 • Empty rate: {empty_rate:.1%}
+• User-visible error rate: {user_visible_error_rate:.1%}
+• Internal tool error rate: {internal_tool_error_rate:.1%}
+• Tool failure rate (tool-used turns): {tool_failure_rate:.1%}
 
 **Performance**
 • Mean cost: ${mean_cost:.4f}
@@ -355,7 +419,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
 
     summary_rows = [
         {"Section": "Volume", "Metric": "Total traces", "Value": f"{total_traces:,}", "Description": "Total number of prompts in the period"},
-        {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation sessions (multi-turn chats)"},
+        {"Section": "Volume", "Metric": "Unique threads", "Value": f"{unique_threads:,}", "Description": "Distinct conversation threads (multi-turn chats)"},
         {"Section": "Volume", "Metric": "Unique users", "Value": f"{unique_users:,}", "Description": "Distinct user IDs that made at least one prompt"},
     ]
     if has_user_first_seen:
@@ -376,6 +440,9 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             {"Section": "Outcomes", "Metric": "Soft error rate", "Value": f"{soft_error_rate:.1%}", "Description": "% of traces classified as SOFT_ERROR (final answer text looks like an error/apology via heuristic matching)"},
             {"Section": "Outcomes", "Metric": "Error rate", "Value": f"{error_rate:.1%}", "Description": "% of traces classified as ERROR (trace has an AI message, but the final extracted answer is empty)"},
             {"Section": "Outcomes", "Metric": "Empty rate", "Value": f"{empty_rate:.1%}", "Description": "% of traces classified as EMPTY (no AI answer message found in output)"},
+            {"Section": "Outcomes", "Metric": "User-visible error rate", "Value": f"{user_visible_error_rate:.1%}", "Description": "% of traces where the user saw an error/empty response (ERROR, EMPTY, or SOFT_ERROR)"},
+            {"Section": "Outcomes", "Metric": "Internal tool error rate", "Value": f"{internal_tool_error_rate:.1%}", "Description": "% of traces with any internal tool/API error (even if the agent recovered)"},
+            {"Section": "Outcomes", "Metric": "Tool failure rate", "Value": f"{tool_failure_rate:.1%}", "Description": "% of tool-using traces where at least one tool call failed"},
             {"Section": "Performance", "Metric": "Mean cost", "Value": f"${mean_cost:.4f}", "Description": "Average LLM cost per trace"},
             {"Section": "Performance", "Metric": "Median cost", "Value": f"${median_cost:.4f}", "Description": "Middle value of cost distribution (less sensitive to outliers)"},
             {"Section": "Performance", "Metric": "p95 cost", "Value": f"${p95_cost:.4f}", "Description": "95th percentile cost (only 5% of traces cost more)"},
@@ -425,7 +492,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
             .agg(
                 traces=("trace_id", "count"),
                 unique_users=("user_id", "nunique"),
-                unique_threads=("session_id", "nunique"),
+                unique_threads=("thread_key", "nunique"),
                 success_rate=("outcome", lambda x: float((x == "ANSWER").mean())),
                 defer_rate=("outcome", lambda x: float((x == "DEFER").mean())),
                 soft_error_rate=("outcome", lambda x: float((x == "SOFT_ERROR").mean())),
@@ -516,7 +583,7 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     with st.expander("ℹ️ Volume & engagement definitions", expanded=False):
         st.markdown(
             "- **Traces** = individual prompts sent to the system\n"
-            "- **Threads** = distinct conversation sessions (multi-turn chats)\n"
+            "- **Threads** = distinct conversation threads (thread_id → sessionId/session_id → trace_id fallback)\n"
             "- **Unique users** = distinct user IDs with ≥1 prompt\n"
             "- **User-days** = total user × day combinations (one user on 3 days = 3)\n"
             "- **Engaged** = user with ≥2 sessions each having ≥2 prompts"

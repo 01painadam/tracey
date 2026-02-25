@@ -12,6 +12,8 @@ from utils import (
     first_human_prompt,
 )
 
+from utils.content_kpis import compute_thread_key
+
 
 def render(
     base_thread_url: str,
@@ -35,42 +37,50 @@ def render(
 
     normed = [normalize_trace_format(t) for t in traces]
 
-    session_ids = set()
     rows: list[dict[str, Any]] = []
     for n in normed:
-        sid = n.get("sessionId")
-        if sid and sid not in session_ids:
-            session_ids.add(sid)
-            url = f"{base_thread_url.rstrip('/')}/{sid}"
-            dt = parse_trace_dt(n)
-            prompt = first_human_prompt(n)
-            prompt_one_line = " ".join(str(prompt or "").split())
-            prompt_snippet = prompt_one_line[:120]
-            if len(prompt_one_line) > len(prompt_snippet):
-                prompt_snippet = f"{prompt_snippet}…"
-            rows.append(
-                {
-                    "timestamp": dt,
-                    "prompt_snippet": prompt_snippet,
-                    "url": url,
-                }
-            )
+        sid = n.get("sessionId") or n.get("session_id")
+        trace_id = n.get("id") or n.get("trace_id") or n.get("traceId")
+        url = f"{base_thread_url.rstrip('/')}/{sid}" if sid else ""
+
+        dt = parse_trace_dt(n)
+        prompt = first_human_prompt(n)
+        prompt_one_line = " ".join(str(prompt or "").split())
+        prompt_snippet = prompt_one_line[:120]
+        if len(prompt_one_line) > len(prompt_snippet):
+            prompt_snippet = f"{prompt_snippet}…"
+
+        rows.append(
+            {
+                "timestamp": dt,
+                "prompt_snippet": prompt_snippet,
+                "session_id": sid,
+                "trace_id": trace_id,
+                "url": url,
+            }
+        )
 
     if not rows:
         st.warning("No sessions found in the fetched traces.")
         return
 
-    st.write(f"**{len(rows)}** unique conversation threads")
-
     df = pd.DataFrame(rows)
-    df["link"] = df["url"].apply(lambda u: f'<a href="{u}" target="_blank">Open</a>')
+    df["thread_key"] = compute_thread_key(df)
+    df = df.sort_values("timestamp", na_position="last")
+    df = df.drop_duplicates(subset=["thread_key"], keep="first").reset_index(drop=True)
+
+    st.write(f"**{len(df)}** unique conversation threads")
+
+    df["link"] = df["url"].apply(
+        lambda u: f'<a href="{u}" target="_blank">Open</a>' if isinstance(u, str) and u else ""
+    )
 
     st.markdown(
         df[["timestamp", "prompt_snippet", "link"]].to_html(escape=False, index=False),
         unsafe_allow_html=True,
     )
 
-    csv_data = csv_bytes_any(rows)
+    csv_data = csv_bytes_any(df.drop(columns=["link"]).to_dict("records"))
 
     st.download_button(
         label="Download CSV",

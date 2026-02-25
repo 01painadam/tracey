@@ -14,7 +14,14 @@ import time as time_mod
 
 from utils.data_helpers import maybe_load_dotenv, iso_utc, csv_bytes_any, init_session_state
 from utils.fetch_throttle import TokenBucket, SharedBudget
-from utils.langfuse_api import fetch_traces_window, fetch_user_first_seen, invalidate_user_first_seen_cache, get_langfuse_headers
+from utils.langfuse_api import (
+    fetch_traces_window,
+    fetch_user_first_seen,
+    invalidate_user_first_seen_cache,
+    get_langfuse_headers,
+    clear_langfuse_disk_cache,
+)
+from utils.config_utils import resolve_app_password
 from utils.trace_parsing import (
     normalize_trace_format,
     first_human_prompt,
@@ -36,7 +43,12 @@ def check_authentication() -> bool:
     """Check if user is authenticated. Returns True if authenticated or no password required."""
     maybe_load_dotenv()
     
-    app_password = os.getenv("APP_PASSWORD", "")
+    app_pw_info = resolve_app_password(
+        st.session_state,
+        getattr(st, "secrets", {}),
+        os.environ,
+    )
+    app_password = str(app_pw_info.get("password") or app_pw_info.get("app_password") or "")
     if "app_authenticated" not in st.session_state:
         st.session_state.app_authenticated = False
 
@@ -126,7 +138,12 @@ def get_app_config() -> dict[str, Any]:
 def render_sidebar() -> dict[str, Any]:
     """Render the shared sidebar and return configuration dict."""
     maybe_load_dotenv()
-    app_password = os.getenv("APP_PASSWORD", "")
+    app_pw_info = resolve_app_password(
+        st.session_state,
+        getattr(st, "secrets", {}),
+        os.environ,
+    )
+    app_password = str(app_pw_info.get("password") or app_pw_info.get("app_password") or "")
 
     default_end = date.today()
     default_start = default_end - timedelta(days=7)
@@ -138,9 +155,10 @@ def render_sidebar() -> dict[str, Any]:
             # Shadow keys survive Streamlit widget-key cleanup between page navigations.
             "_shadow_date_preset": "Last week",
             "_shadow_exclude_internal": True,
+            "stats_use_disk_cache": True,
         }
     )
-    
+
     with st.sidebar:
         if app_password and st.session_state.get("app_authenticated"):
             if st.button("Log out", width="stretch"):
@@ -417,6 +435,41 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                 help="If left blank, Tracey will use GEMINI_API_KEY (or GOOGLE_API_KEY) from the environment.",
             )
             gemini_api_key = str(gemini_override or st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")))
+
+        with st.expander("🧰 Cache", expanded=False):
+            st.checkbox(
+                "Use disk cache",
+                value=bool(st.session_state.get("stats_use_disk_cache", True)),
+                key="stats_use_disk_cache",
+                help=(
+                    "Caches Langfuse trace pages on disk (under utils/__pycache__/langfuse_cache) "
+                    "to speed up repeated fetches. Disable if you want a 'clean' refetch every time."
+                ),
+            )
+
+            if st.button("Clear Langfuse disk cache", width="stretch"):
+                result = clear_langfuse_disk_cache()
+                # Clear in-memory caches as well
+                invalidate_user_first_seen_cache()
+                try:
+                    st.cache_data.clear()
+                except Exception:
+                    pass
+
+                # Drop session-scoped trace caches so the next fetch rehydrates correctly
+                for k in [
+                    "stats_traces_raw",
+                    "stats_traces",
+                    "_last_fetch_summary",
+                    "analytics_user_first_seen",
+                ]:
+                    st.session_state.pop(k, None)
+
+                st.success(
+                    f"Cleared disk cache: removed {result.get('files_removed', 0)} files "
+                    f"(errors={result.get('errors', 0)})."
+                )
+                st.rerun()
 
         with st.expander("⚠️ Limits", expanded=False):
             stats_page_limit = st.number_input(
@@ -763,6 +816,7 @@ def _fetch_chunked(
             backoff=1.0,
             http_timeout_s=stats_http_timeout_s,
             debug_out=chunk_debug,
+            use_disk_cache=bool(st.session_state.get("stats_use_disk_cache", True)),
             rate_limiter=rate_limiter,
             budget=budget,
         )
@@ -969,6 +1023,7 @@ def _fetch_single(
             backoff=1.0,
             http_timeout_s=stats_http_timeout_s,
             debug_out=fetch_debug,
+            use_disk_cache=bool(st.session_state.get("stats_use_disk_cache", True)),
             rate_limiter=rate_limiter,
             on_progress=on_progress,
         )
@@ -1148,3 +1203,21 @@ def _handle_user_invalidate(
     else:
         st.toast("No cache file found (cleared session cache) ⚠️")
     st.rerun()
+
+
+def render_glossary_popover(title: str, glossary: dict[str, str], *, help_text: str | None = None) -> None:
+    """Render a glossary in a Streamlit popover for inline definitions."""
+    try:
+        pop = st.popover(title, help=help_text)
+    except Exception:
+        # Older Streamlit: no popover. Fall back to expander.
+        pop = st.expander(title)
+
+    with pop:
+        if not glossary:
+            st.caption("No glossary entries.")
+            return
+
+        keys = sorted(glossary.keys())
+        choice = st.selectbox("Term", options=keys, index=0, key=f"_glossary_term_{title}")
+        st.markdown(glossary.get(choice, ""))
