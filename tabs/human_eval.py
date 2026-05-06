@@ -189,8 +189,14 @@ def _background_langfuse_write(
     queue_id: str | None,
     score_id: str,
     item_id: str | None,
-) -> None:
-    """Write score and update queue item in background thread (fire-and-forget)."""
+    bug_report: dict[str, Any] | None = None,
+    bug_score_config_id: str | None = None,
+) -> str | None:
+    """Write rating score, update queue item, then optionally write a bug_report score.
+
+    Returns None on full success, or a non-fatal warning string when the rating
+    persisted but the bug-report write failed (caller surfaces as a toast).
+    """
     last_err: Exception | None = None
     try:
         create_score(
@@ -250,6 +256,35 @@ def _background_langfuse_write(
         except Exception as e:
             raise e
 
+    if isinstance(bug_report, dict) and str(bug_report.get("severity") or "").strip():
+        severity = str(bug_report.get("severity")).strip()
+        description = str(bug_report.get("description") or "").strip()
+        try:
+            create_score(
+                base_url=base_url,
+                headers=headers,
+                trace_id=tid,
+                name="bug_report",
+                value=severity,
+                environment=environment,
+                comment=description or None,
+                metadata={
+                    "evaluator": evaluator,
+                    "source": "Tracey",
+                    "kind": "bug_report",
+                    "rating_score_id": score_id,
+                    "rating_value": score_value,
+                    "queue_id": queue_id or "",
+                },
+                config_id=bug_score_config_id,
+                queue_id=queue_id,
+                score_id=f"bug:{tid}:{evaluator}",
+            )
+        except Exception as e:
+            return f"Bug report write failed (rating was saved): {e}"
+
+    return None
+
 
 def render(
     base_thread_url: str,
@@ -304,6 +339,11 @@ def render(
         "human_eval_filter_tools_used": [],
         "human_eval_filter_prompt_contains": "",
         "human_eval_filtered_trace_ids": set(),
+        "human_eval_bug_observed": False,
+        "human_eval_bug_severity": "",
+        "human_eval_bug_description": "",
+        "human_eval_reset_bug_next_run": False,
+        "human_eval_bug_score_config_id": "",
         "human_eval_queue_id": "",
         "human_eval_queue_name": "",
         "human_eval_queue_description": "",
@@ -393,6 +433,23 @@ def render(
         raw = f"{trace_id}||{config_id}||{evaluator}".encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:32]
 
+    def _resolve_bug_score_config_id() -> str:
+        cached = str(st.session_state.get("human_eval_bug_score_config_id") or "").strip()
+        if cached:
+            return cached
+        if not (public_key and secret_key and base_url):
+            return ""
+        try:
+            for c in fetch_score_configs(base_url=base_url, headers=headers):
+                if isinstance(c, dict) and str(c.get("name") or "").strip() == "bug_report":
+                    cid = str(c.get("id") or "").strip()
+                    if cid:
+                        st.session_state.human_eval_bug_score_config_id = cid
+                        return cid
+        except Exception:
+            pass
+        return ""
+
     if bool(st.session_state.get("human_eval_clear_notes_next_run")):
         st.session_state["_eval_notes"] = ""
         st.session_state.human_eval_clear_notes_next_run = False
@@ -447,7 +504,10 @@ def render(
                     "description": str(c.get("description") or ""),
                 }
                 for c in score_configs
-                if isinstance(c, dict) and c.get("id") and c.get("name")
+                if isinstance(c, dict)
+                and c.get("id")
+                and c.get("name")
+                and str(c.get("name") or "").strip() != "bug_report"
             }
             score_cfg_ids = list(score_cfg_options.keys())
             score_cfg_display = {k: v.get("name", k) for k, v in score_cfg_options.items()}
@@ -1365,6 +1425,9 @@ def render(
     if str(st.session_state.get("human_eval_current_trace_id") or "") != trace_id:
         st.session_state.human_eval_current_trace_id = trace_id
         st.session_state["_eval_notes"] = str(existing.get("notes") or "")
+        st.session_state.human_eval_bug_observed = False
+        st.session_state.human_eval_bug_severity = ""
+        st.session_state.human_eval_bug_description = ""
     url = f"{base_thread_url.rstrip('/')}/{row.get('session_id')}" if row.get("session_id") else ""
 
     def _render_content():
@@ -1489,7 +1552,7 @@ def render(
 
         st.caption(_get_encouragement(progress))
         
-        nav_c1, nav_c2, nav_c3 = st.columns([2,3,2])
+        nav_c1, nav_c2 = st.columns([1, 2])
         with nav_c1:
             if st.button("⬅️ Prev", disabled=(idx <= 0), width="stretch"):
                 st.session_state.human_eval_index = idx - 1
@@ -1499,13 +1562,6 @@ def render(
                 st.link_button("🔗 View in GNW", url, width="stretch")
             else:
                 st.button("⛓️ No link", disabled=True, width="stretch")
-        with nav_c3:
-            if st.button("Skip ➡️", width="stretch", disabled=(idx >= len(samples) - 1)):
-                st.session_state.human_eval_clear_notes_next_run = True
-                st.session_state.human_eval_current_trace_id = ""
-                if idx < len(samples) - 1:
-                    st.session_state.human_eval_index = idx + 1
-                st.rerun()
 
         rubric = str(st.session_state.get("human_eval_active_queue_description") or "").strip() or str(
             st.session_state.get("human_eval_queue_description") or ""
@@ -1542,6 +1598,7 @@ def render(
             flagged_for_removal: bool,
             idx: int,
             samples: list,
+            bug_report: dict[str, Any] | None = None,
         ) -> None:
             tid = str(row.get("trace_id") or "")
             queue_id = str(st.session_state.get("human_eval_queue_id") or "").strip() or str(
@@ -1565,15 +1622,24 @@ def render(
             if str(notes or "").strip():
                 formatted_comment = str(notes).rstrip()
 
+            bug_payload: dict[str, Any] | None = None
+            if isinstance(bug_report, dict) and str(bug_report.get("severity") or "").strip():
+                bug_payload = {
+                    "severity": str(bug_report.get("severity") or "").strip(),
+                    "description": str(bug_report.get("description") or "").strip(),
+                }
+
             has_langfuse = bool(public_key and secret_key and base_url)
             langfuse_err: str | None = None
+            bug_warning: str | None = None
             if has_langfuse:
                 score_id = _deterministic_score_id(tid, score_name, evaluator)
                 item_map = st.session_state.get("human_eval_queue_items", {})
                 item_id = item_map.get(tid) if isinstance(item_map, dict) else None
+                bug_cfg_id = _resolve_bug_score_config_id() if bug_payload else ""
 
                 try:
-                    _background_langfuse_write(
+                    bug_warning = _background_langfuse_write(
                         base_url=base_url,
                         headers=dict(headers),
                         tid=tid,
@@ -1587,6 +1653,8 @@ def render(
                         queue_id=queue_id or None,
                         score_id=score_id,
                         item_id=item_id if isinstance(item_id, str) and item_id.strip() else None,
+                        bug_report=bug_payload,
+                        bug_score_config_id=bug_cfg_id or None,
                     )
                 except Exception as e:
                     langfuse_err = str(e)
@@ -1603,6 +1671,7 @@ def render(
                     "rating": rating,
                     "notes": notes or existing_notes,
                     "flagged_for_removal": bool(flagged_for_removal),
+                    "bug_report": bug_payload,
                     "prompt": row.get("prompt"),
                     "answer": row.get("answer"),
                 }
@@ -1614,6 +1683,7 @@ def render(
             st.session_state.human_eval_clear_notes_next_run = True
             st.session_state.human_eval_current_trace_id = ""
             st.session_state.human_eval_reset_flagged_for_removal = True
+            st.session_state.human_eval_reset_bug_next_run = True
 
             if idx < len(samples) - 1:
                 st.session_state.human_eval_index = idx + 1
@@ -1621,9 +1691,53 @@ def render(
             toast_msg = f"Rated: {rating} ✓"
             if langfuse_err:
                 toast_msg = f"Rated: {rating} (Langfuse write failed: {langfuse_err[:200]})"
+            elif bug_warning:
+                toast_msg = f"Rated: {rating} ✓ — {bug_warning[:200]}"
+            elif bug_payload:
+                toast_msg = f"Rated: {rating} ✓ — bug logged"
             st.session_state.human_eval_pending_toast = toast_msg
             st.rerun()
         
+        if bool(st.session_state.get("human_eval_reset_bug_next_run", False)):
+            st.session_state.human_eval_reset_bug_next_run = False
+            st.session_state.human_eval_bug_observed = False
+            st.session_state.human_eval_bug_severity = ""
+            st.session_state.human_eval_bug_description = ""
+
+        st.checkbox(
+            "🐛 Report a bug",
+            key="human_eval_bug_observed",
+            help="Flag a bug observed in the trace's behaviour, separate from your Pass/Fail rating.",
+        )
+
+        if st.session_state.human_eval_bug_observed:
+            with st.container(border=True):
+                st.selectbox(
+                    "Severity",
+                    options=["", "low", "medium", "high", "critical"],
+                    format_func=lambda v: v if v else "-- choose --",
+                    key="human_eval_bug_severity",
+                    help="low: cosmetic · medium: noticeable defect · high: wrong answer/tool call · critical: broken/unsafe.",
+                )
+                st.text_area(
+                    "What did the agent do wrong?",
+                    key="human_eval_bug_description",
+                    placeholder="Describe the bug. Include expected vs. actual if not obvious.",
+                    height=120,
+                )
+                if not str(st.session_state.human_eval_bug_severity or "").strip():
+                    st.caption("ℹ️ Pick a severity to log a bug. Otherwise the rating saves on its own.")
+
+        bug_report_payload: dict[str, Any] | None = None
+        if (
+            st.session_state.human_eval_bug_observed
+            and str(st.session_state.human_eval_bug_severity or "").strip()
+        ):
+            bug_report_payload = {
+                "severity": str(st.session_state.human_eval_bug_severity or "").strip(),
+                "description": str(st.session_state.human_eval_bug_description or "").strip(),
+            }
+
         st.markdown("**✅ Score this response**", help="NOTE: You can only rate a response once.")
         r1, r2, r3 = st.columns(3)
         with r1:
@@ -1641,6 +1755,7 @@ def render(
                     bool(st.session_state.get("human_eval_flagged_for_removal", False)),
                     idx,
                     samples,
+                    bug_report_payload,
                 )
         with r2:
             if st.button(
@@ -1657,6 +1772,7 @@ def render(
                     bool(st.session_state.get("human_eval_flagged_for_removal", False)),
                     idx,
                     samples,
+                    bug_report_payload,
                 )
         with r3:
             if st.button(
@@ -1673,6 +1789,7 @@ def render(
                     bool(st.session_state.get("human_eval_flagged_for_removal", False)),
                     idx,
                     samples,
+                    bug_report_payload,
                 )
 
         if bool(st.session_state.get("human_eval_reset_flagged_for_removal", False)):

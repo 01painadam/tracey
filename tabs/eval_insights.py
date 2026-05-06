@@ -121,6 +121,12 @@ def render(
 
     # Build DataFrame from scores
     df = _build_scores_dataframe(scores)
+    if "is_bug" in df.columns:
+        df_ratings = df[~df["is_bug"].fillna(False)].reset_index(drop=True)
+        df_bugs = df[df["is_bug"].fillna(False)].reset_index(drop=True)
+    else:
+        df_ratings = df
+        df_bugs = df.iloc[0:0]
 
     # Display scores table in closed expander
     with st.expander(f"📊 Raw Scores Data ({len(df)} scores)", expanded=False):
@@ -155,7 +161,7 @@ def render(
         queue_items = []
 
     # Calculate metrics
-    metrics = _calculate_metrics(df, queue_items)
+    metrics = _calculate_metrics(df_ratings, queue_items)
 
     # Top row
     col1, col2 = st.columns(2)
@@ -164,22 +170,31 @@ def render(
         _render_completion_section(metrics, queue_items)
 
     with col2:
-        _render_score_distribution_chart(df)
+        _render_score_distribution_chart(df_ratings)
 
     st.divider()
 
     # Full-width Outcome Rates section
-    _render_outcome_rates_section(df, metrics)
+    _render_outcome_rates_section(df_ratings, metrics)
+
+    st.divider()
+
+    _render_bug_reports_section(
+        df_bugs=df_bugs,
+        completed_items=int(metrics.get("completed_items") or 0),
+        base_thread_url=base_thread_url,
+        queue_name=queue_name,
+    )
 
     st.divider()
 
     # Additional insights
-    _render_temporal_insights(df)
+    _render_temporal_insights(df_ratings)
 
     st.divider()
 
     _render_flagged_for_removal_section(
-        df=df,
+        df=df_ratings,
     )
 
 
@@ -217,20 +232,119 @@ def _build_scores_dataframe(scores: list[dict[str, Any]]) -> pd.DataFrame:
     for s in scores:
         if not isinstance(s, dict):
             continue
+        meta = s.get("metadata") or {}
+        name = str(s.get("name") or "")
+        is_bug = (name == "bug_report") or (str(meta.get("kind") or "") == "bug_report")
+        value = s.get("stringValue")
+        comment = s.get("comment")
         rows.append({
             "score_id": s.get("id"),
             "trace_id": s.get("traceId"),
-            "queue_id": s.get("metadata", {}).get("queue_id", None),
-            "evaluator": s.get("metadata", {}).get("evaluator", ""),
-            "source": s.get("metadata", {}).get("source", None),
-            "flagged_for_removal": bool(s.get("metadata", {}).get("flagged_for_removal", False)),
-            "score_config": s.get("name"),
-            "value": s.get("stringValue"),
-            "comment": s.get("comment"),
+            "queue_id": meta.get("queue_id", None),
+            "evaluator": meta.get("evaluator", ""),
+            "source": meta.get("source", None),
+            "flagged_for_removal": bool(meta.get("flagged_for_removal", False)),
+            "score_config": name,
+            "value": value,
+            "comment": comment,
             "timestamp": s.get("timestamp"),
             "data_type": s.get("dataType"),
+            "is_bug": is_bug,
+            "bug_severity": value if is_bug else None,
+            "bug_description": comment if is_bug else None,
         })
     return pd.DataFrame(rows)
+
+
+SEVERITY_ORDER = ["critical", "high", "medium", "low"]
+SEVERITY_COLORS = {
+    "critical": "#ef4444",
+    "high": "#f59e0b",
+    "medium": "#facc15",
+    "low": "#9ca3af",
+}
+
+
+def _render_bug_reports_section(
+    *,
+    df_bugs: pd.DataFrame,
+    completed_items: int,
+    base_thread_url: str,
+    queue_name: str,
+) -> None:
+    st.markdown("### 🐛 Bug Reports")
+    st.caption(
+        "Bugs reviewers observed in the trace's behaviour, separate from the Pass/Fail rating."
+    )
+
+    total_bugs = int(len(df_bugs))
+    if total_bugs == 0:
+        st.caption("No bugs reported in this queue.")
+        return
+
+    sev = df_bugs["bug_severity"].fillna("").astype(str).str.lower() if "bug_severity" in df_bugs.columns else pd.Series(dtype=str)
+    sev_counts = sev.value_counts().to_dict()
+    high_or_critical = int(sev_counts.get("critical", 0)) + int(sev_counts.get("high", 0))
+    bug_rate = (total_bugs / completed_items) if completed_items else 0.0
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Total bugs", total_bugs)
+    with m2:
+        st.metric("Bug rate", f"{bug_rate:.1%}", help=f"{total_bugs} bugs across {completed_items} completed evaluations.")
+    with m3:
+        st.metric("Critical + high", high_or_critical)
+
+    if sev_counts:
+        chart_df = pd.DataFrame(
+            [{"severity": s, "count": int(sev_counts.get(s, 0))} for s in SEVERITY_ORDER if sev_counts.get(s)]
+        )
+        if not chart_df.empty:
+            chart = (
+                alt.Chart(chart_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("count:Q", title="Count"),
+                    y=alt.Y("severity:N", sort=SEVERITY_ORDER, title=None),
+                    color=alt.Color(
+                        "severity:N",
+                        scale=alt.Scale(domain=SEVERITY_ORDER, range=[SEVERITY_COLORS[s] for s in SEVERITY_ORDER]),
+                        legend=None,
+                    ),
+                    tooltip=[
+                        alt.Tooltip("severity:N", title="Severity"),
+                        alt.Tooltip("count:Q", title="Count"),
+                    ],
+                )
+                .properties(height=140)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+    display_cols = ["trace_id", "bug_severity", "bug_description", "evaluator", "timestamp"]
+    available_cols = [c for c in display_cols if c in df_bugs.columns]
+    if available_cols:
+        with st.expander(f"View bug reports ({total_bugs})", expanded=False):
+            df_display = df_bugs[available_cols].copy()
+            column_config: dict[str, Any] = {}
+            if "trace_id" in df_display.columns and base_thread_url:
+                url_prefix = base_thread_url.rstrip("/") + "/"
+                df_display["trace_id"] = df_display["trace_id"].fillna("").astype(str).map(
+                    lambda tid: f"{url_prefix}{tid}" if tid else ""
+                )
+                column_config["trace_id"] = st.column_config.LinkColumn(
+                    "trace_id",
+                    display_text=r"/([^/]+)$",
+                )
+            st.dataframe(df_display, hide_index=True, width="stretch", column_config=column_config)
+
+            csv_filename = f"bugs_{queue_name or 'queue'}.csv".replace("/", "_")
+            st.download_button(
+                label="📥 Download bugs CSV",
+                data=df_bugs[available_cols].to_csv(index=False).encode("utf-8"),
+                file_name=csv_filename,
+                mime="text/csv",
+                key="eval_insights_bugs_csv",
+            )
 
 
 def _render_flagged_for_removal_section(
