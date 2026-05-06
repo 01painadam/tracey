@@ -17,4 +17,5 @@ render_eval_insights(
     public_key=config["public_key"],
     secret_key=config["secret_key"],
     base_url=config["base_url"],
+    base_thread_url=config["base_thread_url"],
 )

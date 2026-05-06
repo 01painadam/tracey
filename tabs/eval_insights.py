@@ -21,6 +21,7 @@ def render(
     public_key: str,
     secret_key: str,
     base_url: str,
+    base_thread_url: str = "",
 ) -> None:
     """Render the Eval Insights dashboard."""
     st.subheader("📈 Eval Insights")
@@ -125,7 +126,20 @@ def render(
     with st.expander(f"📊 Raw Scores Data ({len(df)} scores)", expanded=False):
         display_cols = ["trace_id", "score_config", "value", "comment", "source", "evaluator", "timestamp"]
         available_cols = [c for c in display_cols if c in df.columns]
-        st.dataframe(df[available_cols] if available_cols else df, hide_index=True, width="stretch")
+        df_display = df[available_cols].copy() if available_cols else df.copy()
+
+        column_config: dict[str, Any] = {}
+        if "trace_id" in df_display.columns and base_thread_url:
+            url_prefix = base_thread_url.rstrip("/") + "/"
+            df_display["trace_id"] = df_display["trace_id"].fillna("").astype(str).map(
+                lambda tid: f"{url_prefix}{tid}" if tid else ""
+            )
+            column_config["trace_id"] = st.column_config.LinkColumn(
+                "trace_id",
+                display_text=r"/([^/]+)$",
+            )
+
+        st.dataframe(df_display, hide_index=True, width="stretch", column_config=column_config)
 
     st.divider()
     st.subheader("📊 Insights Dashboard")
