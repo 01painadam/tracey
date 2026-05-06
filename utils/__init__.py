@@ -89,6 +89,7 @@ from utils.user_segments import (
     UserSegments,
 )
 from utils.charts import (
+    LANG_NAME_MAP,
     daily_volume_chart,
     daily_outcome_chart,
     daily_cost_chart,
@@ -188,6 +189,7 @@ __all__ = [
     "call_gemini_structured",
     "model_aware_batch_size",
     # Charts
+    "LANG_NAME_MAP",
     "daily_volume_chart",
     "daily_outcome_chart",
     "daily_cost_chart",

@@ -10,7 +10,7 @@ All prompts are GNW (Global Nature Watch) domain-specific.
 DEFAULT_ENRICHMENT_SYSTEM = (
     "You are a product analyst for Global Nature Watch (GNW), an AI-powered "
     "geospatial platform that helps users analyse land cover change, deforestation, "
-    "biodiversity, restoration, and related environmental topics. "
+    "restoration, and related environmental topics. "
     "Users interact with a chat assistant that has access to GIS datasets and tools."
 )
 
@@ -33,10 +33,10 @@ ASSISTANT RESPONSE (may be truncated):
 Extract the following fields:
 - topic: Primary topic. One of: land_cover_change, deforestation, biodiversity, restoration, agriculture_cropland, urbanisation, fire_disturbance, water_resources, climate, protected_areas, general_knowledge, other.
 - dataset_required: The GNW dataset needed to answer this query (e.g. land_cover, tree_cover_loss, fire_alerts, crop_extent, protected_areas, elevation). Null if unclear.
-- query_type: One of: spatial_analysis, trend_analysis, comparison, data_lookup, explanation, metadata, other.
+- query_type: One of: spatial_analysis, trend_analysis, comparison, data_lookup, explanation, metadata, dataset_availability, capability_availability, output_export_request, other.
 - geographic_scope: Country, region, or area mentioned. Use 'custom_aoi' for drawn polygons. Null if none.
 - intent: The user's job-to-be-done as a short phrase (e.g. 'monitor deforestation trends for annual report').
-- complexity: One of: simple, moderate, complex.
+- complexity: One of: simple (closed), moderate, complex (open-ended
 - outcome: How well the assistant handled it. One of: success, partial, failure, unclear. Use the KNOWN CONTEXT heuristic outcome as a strong signal.
 - failure_mode: If outcome is partial/failure, why. One of: missing_dataset, wrong_interpretation, capability_gap, api_error, ambiguous_query, geographic_gap. Null if success/unclear.
 
@@ -48,10 +48,10 @@ Analyse each user–assistant interaction and extract structured metadata.
 For each trace, extract:
 - topic: Primary topic. One of: land_cover_change, deforestation, biodiversity, restoration, agriculture_cropland, urbanisation, fire_disturbance, water_resources, climate, protected_areas, general_knowledge, other.
 - dataset_required: The GNW dataset needed (e.g. land_cover, tree_cover_loss, fire_alerts, crop_extent, protected_areas, elevation). Null if unclear.
-- query_type: One of: spatial_analysis, trend_analysis, comparison, data_lookup, explanation, metadata, other.
+- query_type: One of: spatial_analysis, trend_analysis, comparison, data_lookup, explanation, metadata, dataset_availability, capability_availability, output_export_request, other.
 - geographic_scope: Country/region/area mentioned. 'custom_aoi' for drawn polygons. Null if none.
 - intent: User's job-to-be-done as a short phrase.
-- complexity: One of: simple, moderate, complex.
+- complexity: One of: simple (closed), moderate, complex (open-ended)
 - outcome: How well the assistant handled it. One of: success, partial, failure, unclear. Use each trace's KNOWN CONTEXT as a strong signal.
 - failure_mode: If partial/failure, why. One of: missing_dataset, wrong_interpretation, capability_gap, api_error, ambiguous_query, geographic_gap. Null otherwise.
 
@@ -97,7 +97,7 @@ these sections in order:
 ## 1. Analysis Type Classification
 Classify what kinds of analysis users request. Categories: simple quantification, \
 trend/time-series, spatial visualisation, ranking/leaderboard, comparative, \
-causal/driver, metadata/info, complex multi-step. Show distribution table + examples.
+causal/driver, metadata/info, dataset/capability availability, complex multi-step / open-ended, output / export request. Show distribution table + examples.
 
 ## 2. Welcome Prompt Impact
 Compare welcome-prompt sessions vs organic sessions: engagement (bounce rate, \

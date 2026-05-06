@@ -49,7 +49,7 @@ def _render_llm_settings(
     gemini_model_options: list[str],
 ) -> tuple[str, bool, int, int]:
     """Render LLM settings expander and return (model, use_batching, batch_size, max_chars)."""
-    default_model = "gemini-2.5-flash-lite"
+    default_model = "gemini-3.1-flash-lite-preview"
     if default_model not in gemini_model_options and gemini_model_options:
         default_model = gemini_model_options[0]
 
@@ -129,6 +129,7 @@ def render(
         return
 
     gemini_model_options = get_gemini_model_options(gemini_api_key) if gemini_api_key else [
+        "gemini-3.1-flash-lite-preview",
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
         "gemini-1.5-pro",

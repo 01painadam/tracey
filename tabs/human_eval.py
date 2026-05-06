@@ -35,6 +35,9 @@ from utils import (
     parse_json_any,
     chunked,
     call_gemini,
+    classify_outcome,
+    parse_trace_dt,
+    LANG_NAME_MAP,
 )
 
 
@@ -68,6 +71,98 @@ def _get_encouragement(progress: float) -> str:
         return ENCOURAGEMENT_MESSAGES[4]
     else:
         return ENCOURAGEMENT_MESSAGES[5]
+
+
+AOI_TYPE_NONE_LABEL = "(none)"
+PROMPT_PREVIEW_CHARS = 240
+LANG_UNKNOWN = "unknown"
+
+_LANG_IDENTIFIER: Any = None
+_LANG_IDENTIFIER_FAILED = False
+
+
+def _get_lang_identifier() -> Any:
+    global _LANG_IDENTIFIER, _LANG_IDENTIFIER_FAILED
+    if _LANG_IDENTIFIER_FAILED or _LANG_IDENTIFIER is not None:
+        return _LANG_IDENTIFIER
+    try:
+        from langid.langid import LanguageIdentifier, model as langid_model
+        _LANG_IDENTIFIER = LanguageIdentifier.from_modelstring(langid_model, norm_probs=True)
+    except Exception:
+        _LANG_IDENTIFIER_FAILED = True
+    return _LANG_IDENTIFIER
+
+
+def _detect_lang(text: str) -> str:
+    if not isinstance(text, str) or len(text.strip()) < 3:
+        return LANG_UNKNOWN
+    identifier = _get_lang_identifier()
+    if identifier is None:
+        return LANG_UNKNOWN
+    try:
+        code, _conf = identifier.classify(text)
+        return str(code) if code else LANG_UNKNOWN
+    except Exception:
+        return LANG_UNKNOWN
+
+
+def _build_filter_index(traces_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for t in traces_list:
+        try:
+            n = normalize_trace_format(t)
+        except Exception:
+            continue
+        tid = str(n.get("id") or "").strip()
+        if not tid:
+            continue
+        prompt = first_human_prompt(n)
+        answer = final_ai_message(n)
+        ctx = extract_trace_context(n) or {}
+        dt = parse_trace_dt(n)
+        out.append(
+            {
+                "trace_id": tid,
+                "environment": str(n.get("environment") or ""),
+                "date": dt.date() if dt else None,
+                "aoi_type_label": str(ctx.get("aoi_type") or "").strip() or AOI_TYPE_NONE_LABEL,
+                "datasets": frozenset(str(d) for d in (ctx.get("datasets") or []) if d),
+                "tools_used": frozenset(str(x) for x in (ctx.get("tools_used") or []) if x),
+                "prompt_lower": (prompt or "").lower(),
+                "prompt_preview": truncate_text(prompt or "", PROMPT_PREVIEW_CHARS),
+                "outcome": classify_outcome(n, answer or ""),
+                "lang": _detect_lang(prompt or ""),
+                "has_prompt_answer": bool(prompt and answer),
+            }
+        )
+    return out
+
+
+def _get_filter_index(traces_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Piggyback on the sidebar's _trace_filter_key (set in utils/shared_ui.py whenever
+    # stats_traces is re-derived) so we rebuild exactly when the visible trace set changes.
+    cache_key = (
+        st.session_state.get("_trace_filter_key"),
+        len(traces_list),
+    )
+    cached = st.session_state.get("_human_eval_filter_index_cache")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["rows"]
+    rows = _build_filter_index(traces_list)
+    st.session_state["_human_eval_filter_index_cache"] = {"key": cache_key, "rows": rows}
+    return rows
+
+
+def _gemini_match_ids(cache: Any, gem_key: str) -> set[str]:
+    if not gem_key or not isinstance(cache, dict):
+        return set()
+    return {
+        str(tid)
+        for tid, entry in cache.items()
+        if isinstance(entry, dict)
+        and entry.get("criteria_key") == gem_key
+        and entry.get("match") is True
+    }
 
 
 def _format_elapsed(started_at: float | None) -> str:
@@ -202,6 +297,13 @@ def render(
         "human_eval_filter_criteria": "",
         "human_eval_filter_model": "",
         "human_eval_filter_cache": {},
+        "human_eval_filter_outcomes": [],
+        "human_eval_filter_aoi_types": [],
+        "human_eval_filter_languages": [],
+        "human_eval_filter_datasets_used": [],
+        "human_eval_filter_tools_used": [],
+        "human_eval_filter_prompt_contains": "",
+        "human_eval_filtered_trace_ids": set(),
         "human_eval_queue_id": "",
         "human_eval_queue_name": "",
         "human_eval_queue_description": "",
@@ -315,10 +417,12 @@ def render(
             step1_container = st.container(border=True)
             step2_container = st.container(border=True)
             step3_container = st.container(border=True)
+            step4_container = st.container(border=True)
         except TypeError:
             step1_container = st.container()
             step2_container = st.container()
             step3_container = st.container()
+            step4_container = st.container()
 
         has_langfuse = bool(public_key and secret_key and base_url)
         if not has_langfuse:
@@ -527,139 +631,86 @@ def render(
                     st.link_button("🔗 Open in Langfuse", queue_url)
 
         with step3_container:
-            st.subheader("3. Start Evaluating!")
-            evaluator_name = st.text_input(
-                "Reviewer full name (to create unique scores)",
-                value=st.session_state.human_eval_evaluator_name,
-                placeholder="e.g. Alice Smith",
-                key="_eval_name_input",
-                help="Used in CSV filename and appended to Langfuse score comments.",
+            st.subheader("3. Filter traces (optional)")
+            st.caption(
+                "Narrow the pool of traces before sampling. Filters AND together — leave any empty to skip it. "
+                "Filters apply to **Sampling**; loading pending queue items is unaffected."
             )
-            if evaluator_name.strip():
-                st.session_state.human_eval_evaluator_name = _slugify_name(evaluator_name)
 
-            name_ok = bool(str(st.session_state.get("human_eval_evaluator_name") or "").strip())
-            if not name_ok:
-                st.info("Enter a reviewer name to enable evaluation and sampling actions.")
+            filter_index = _get_filter_index(traces)
 
-            cfg_ok = bool(str(st.session_state.get("human_eval_score_config_id") or "").strip())
-            queue_ok = bool(str(st.session_state.get("human_eval_queue_id") or "").strip())
-            ready = bool(has_langfuse and cfg_ok and queue_ok)
+            outcome_counts: dict[str, int] = {}
+            aoi_type_counts: dict[str, int] = {}
+            lang_counts: dict[str, int] = {}
+            dataset_set: set[str] = set()
+            tool_set: set[str] = set()
+            for fr in filter_index:
+                if not fr["has_prompt_answer"]:
+                    continue
+                outcome_counts[fr["outcome"]] = outcome_counts.get(fr["outcome"], 0) + 1
+                aoi_type_counts[fr["aoi_type_label"]] = aoi_type_counts.get(fr["aoi_type_label"], 0) + 1
+                lang_counts[fr["lang"]] = lang_counts.get(fr["lang"], 0) + 1
+                dataset_set.update(fr["datasets"])
+                tool_set.update(fr["tools_used"])
 
-            pending_count = 0
-            if ready:
-                try:
-                    pending_items = list_annotation_queue_items(
-                        base_url=base_url,
-                        headers=headers,
-                        queue_id=str(st.session_state.human_eval_queue_id),
-                        status="PENDING",
-                        page=1,
-                        limit=100,
-                    )
-                    pending_count = len(pending_items)
-                except Exception:
-                    pending_items = []
-            else:
-                pending_items = []
+            outcome_options = sorted(outcome_counts.keys())
+            aoi_type_options = sorted(aoi_type_counts.keys())
+            lang_options = sorted(lang_counts.keys(), key=lambda c: (-lang_counts[c], c))
+            dataset_options = sorted(dataset_set)
+            tool_options = sorted(tool_set)
 
-            action_c1, action_c2 = st.columns(2)
-            with action_c1:
-                if st.button(
-                    f"▶️ Evaluate pending items ({pending_count})",
-                    type="primary",
-                    disabled=not bool(name_ok and ready and pending_count > 0),
-                    help="Loads pending queue items from Langfuse and starts the evaluation session.",
-                ):
-                    queue_id = str(st.session_state.human_eval_queue_id)
-                    st.session_state.human_eval_active_queue_id = queue_id
-                    st.session_state.human_eval_active_score_config_id = str(st.session_state.human_eval_score_config_id)
-                    st.session_state.human_eval_active_score_config_name = str(st.session_state.human_eval_score_config_name)
-                    st.session_state.human_eval_active_score_config_description = str(
-                        st.session_state.human_eval_score_config_description
-                    )
-                    st.session_state.human_eval_active_queue_description = str(
-                        st.session_state.human_eval_queue_description
-                    )
+            if not st.session_state.get("_human_eval_outcomes_seeded"):
+                st.session_state.human_eval_filter_outcomes = list(outcome_options)
+                st.session_state._human_eval_outcomes_seeded = True
 
-                    trace_ids = [
-                        str(it.get("objectId") or "").strip()
-                        for it in pending_items
-                        if isinstance(it, dict) and str(it.get("objectType") or "").upper() == "TRACE"
-                    ]
-                    item_map = {
-                        str(it.get("objectId") or "").strip(): str(it.get("id") or "").strip()
-                        for it in pending_items
-                        if isinstance(it, dict) and it.get("objectId") and it.get("id")
-                    }
+            def _lang_label(code: str) -> str:
+                name = LANG_NAME_MAP.get(code) or (code.upper() if code else "Unknown")
+                return f"{name} ({lang_counts.get(code, 0):,})"
 
-                    trace_by_id: dict[str, dict[str, Any]] = {}
-                    for t in traces:
-                        try:
-                            n = normalize_trace_format(t)
-                            tid = str(n.get("id") or "").strip()
-                            if tid:
-                                trace_by_id[tid] = n
-                        except Exception:
-                            continue
+            f_row1 = st.columns(3)
+            with f_row1[0]:
+                st.multiselect(
+                    "Outcome",
+                    options=outcome_options,
+                    format_func=lambda v: f"{v} ({outcome_counts.get(v, 0):,})",
+                    key="human_eval_filter_outcomes",
+                    help="ANSWER, DEFER, SOFT_ERROR, ERROR, EMPTY — same classification used by the Analytics page.",
+                )
+            with f_row1[1]:
+                st.multiselect(
+                    "AOI type",
+                    options=aoi_type_options,
+                    format_func=lambda v: f"{v} ({aoi_type_counts.get(v, 0):,})",
+                    key="human_eval_filter_aoi_types",
+                    help="Pulled from the pick_aoi tool output; '(none)' = no AOI selected in the trace.",
+                )
+            with f_row1[2]:
+                st.multiselect(
+                    "Language",
+                    options=lang_options,
+                    format_func=_lang_label,
+                    key="human_eval_filter_languages",
+                    help="Detected by langid on the user prompt — same approach as the Analytics tab.",
+                )
 
-                    loaded: list[dict[str, Any]] = []
-                    prog = st.progress(0.0, text="Preparing pending traces...")
-                    for i, tid in enumerate(trace_ids):
-                        n = trace_by_id.get(tid)
-                        if n is None:
-                            try:
-                                tr = fetch_trace(base_url=base_url, headers=headers, trace_id=tid)
-                                n = normalize_trace_format(tr)
-                            except Exception:
-                                n = None
-                        if n is not None:
-                            prompt = first_human_prompt(n)
-                            answer = final_ai_message(n)
-                            if prompt and answer:
-                                helper_info = extract_trace_context(n)
-                                chart_data = _extract_chart_data(n)
-                                loaded.append(
-                                    {
-                                        "trace_id": n.get("id"),
-                                        "timestamp": n.get("timestamp"),
-                                        "session_id": n.get("sessionId"),
-                                        "environment": n.get("environment"),
-                                        "prompt": prompt,
-                                        "answer": answer,
-                                        "aois": helper_info.get("aois", []),
-                                        "datasets": helper_info.get("datasets", []),
-                                        "datasets_analysed": helper_info.get("datasets_analysed", []),
-                                        "tools_used": helper_info.get("tools_used", []),
-                                        "pull_data_calls": helper_info.get("pull_data_calls", []),
-                                        "chart_insight_text": helper_info.get("chart_insight_text", ""),
-                                        "chart_data": chart_data,
-                                        "aoi_name": helper_info.get("aoi_name", ""),
-                                        "aoi_type": helper_info.get("aoi_type", ""),
-                                        "filter_match": False,
-                                    }
-                                )
-                        prog.progress((i + 1) / max(1, len(trace_ids)))
-                    prog.empty()
-
-                    st.session_state.human_eval_samples = loaded
-                    st.session_state.human_eval_queue_items = item_map
-                    st.session_state.human_eval_index = 0
-                    st.session_state.human_eval_annotations = {}
-                    st.session_state.human_eval_started_at = time.time()
-                    st.session_state.human_eval_completed = False
-                    st.session_state.human_eval_streak = 0
-                    st.session_state.human_eval_showed_balloons = False
-                    st.rerun()
-
-            with action_c2:
-                st.caption("Or sample traces and add them to the eval queue.")
-
-            col_size, col_seed = st.columns(2)
-            with col_size:
-                sample_size = st.number_input("Sample size", min_value=1, max_value=200, value=10)
-            with col_seed:
-                random_seed = st.number_input("Random seed", min_value=0, max_value=10_000_000, value=0)
+            st.multiselect(
+                "Datasets used",
+                options=dataset_options,
+                key="human_eval_filter_datasets_used",
+                help="Trace passes if it touched any of the selected datasets.",
+            )
+            st.multiselect(
+                "Tools used",
+                options=tool_options,
+                key="human_eval_filter_tools_used",
+                help="Trace passes if it called any of the selected tools.",
+            )
+            st.text_input(
+                "Prompt contains",
+                key="human_eval_filter_prompt_contains",
+                placeholder="e.g. tree cover loss",
+                help="Case-insensitive substring against the user's prompt.",
+            )
 
             with st.expander(
                 "🔎 Optional: Gemini pre-filter (SME topic/dataset)",
@@ -674,7 +725,7 @@ def render(
                 )
 
                 gemini_model_options = get_gemini_model_options(gemini_api_key) if gemini_api_key else []
-                default_model = "gemini-2.5-flash-lite"
+                default_model = "gemini-3.1-flash-lite-preview"
                 if gemini_model_options and default_model not in gemini_model_options:
                     default_model = gemini_model_options[0]
 
@@ -824,40 +875,239 @@ def render(
                         progress.empty()
 
                 cache = st.session_state.get("human_eval_filter_cache", {})
-                key = _criteria_key(str(st.session_state.get("human_eval_filter_model") or ""), str(criteria or ""))
-                evaluated = 0
-                matches = 0
-                matched_rows: list[dict[str, Any]] = []
-                if isinstance(cache, dict) and key and criteria.strip():
-                    for t in traces:
-                        n = normalize_trace_format(t)
-                        tid = str(n.get("id") or "")
-                        if not tid:
-                            continue
-                        entry = cache.get(tid)
-                        if isinstance(entry, dict) and entry.get("criteria_key") == key:
-                            evaluated += 1
-                            if entry.get("match") is True:
-                                matches += 1
-                                prompt_txt = first_human_prompt(n)
-                                matched_rows.append(
-                                    {
-                                        "trace_id": tid,
-                                        "session_id": str(n.get("sessionId") or ""),
-                                        "prompt": truncate_text(str(prompt_txt or ""), 220),
-                                        "reason": truncate_text(str(entry.get("reason") or ""), 220),
-                                    }
-                                )
+                gem_key = _criteria_key(
+                    str(st.session_state.get("human_eval_filter_model") or ""),
+                    str(criteria or ""),
+                )
+                if isinstance(cache, dict) and gem_key and criteria.strip():
+                    evaluated = sum(
+                        1
+                        for entry in cache.values()
+                        if isinstance(entry, dict) and entry.get("criteria_key") == gem_key
+                    )
+                    match_ids = _gemini_match_ids(cache, gem_key)
 
                     st.caption(
-                        f"Gemini filter coverage: {evaluated:,}/{len(traces):,} classified. Matches: {matches:,}."
+                        f"Gemini filter coverage: {evaluated:,}/{len(traces):,} classified. Matches: {len(match_ids):,}."
                     )
 
-                    preview_df = matched_rows[:5]
-                    if preview_df:
-                        st.dataframe(preview_df, hide_index=True, width="stretch")
+                    matched_rows: list[dict[str, Any]] = []
+                    for fr in filter_index:
+                        if fr["trace_id"] not in match_ids:
+                            continue
+                        entry = cache.get(fr["trace_id"]) or {}
+                        matched_rows.append(
+                            {
+                                "trace_id": fr["trace_id"],
+                                "prompt": fr["prompt_preview"],
+                                "reason": truncate_text(str(entry.get("reason") or ""), 220),
+                            }
+                        )
+                        if len(matched_rows) >= 5:
+                            break
+
+                    if matched_rows:
+                        st.dataframe(matched_rows, hide_index=True, width="stretch")
                     else:
                         st.info("No matched examples to preview yet.")
+
+            selected_outcomes = frozenset(st.session_state.human_eval_filter_outcomes)
+            selected_aoi_types = frozenset(st.session_state.human_eval_filter_aoi_types)
+            selected_languages = frozenset(st.session_state.human_eval_filter_languages)
+            selected_datasets = frozenset(st.session_state.human_eval_filter_datasets_used)
+            selected_tools = frozenset(st.session_state.human_eval_filter_tools_used)
+            prompt_substr = st.session_state.human_eval_filter_prompt_contains.strip().lower()
+
+            def _passes_structural(fr: dict[str, Any]) -> bool:
+                if not fr["has_prompt_answer"]:
+                    return False
+                if selected_outcomes and fr["outcome"] not in selected_outcomes:
+                    return False
+                if selected_aoi_types and fr["aoi_type_label"] not in selected_aoi_types:
+                    return False
+                if selected_languages and fr["lang"] not in selected_languages:
+                    return False
+                if selected_datasets and selected_datasets.isdisjoint(fr["datasets"]):
+                    return False
+                if selected_tools and selected_tools.isdisjoint(fr["tools_used"]):
+                    return False
+                if prompt_substr and prompt_substr not in fr["prompt_lower"]:
+                    return False
+                return True
+
+            structural_ids = {fr["trace_id"] for fr in filter_index if _passes_structural(fr)}
+
+            if st.session_state.human_eval_filter_criteria.strip():
+                gem_key_active = _criteria_key(
+                    st.session_state.human_eval_filter_model,
+                    st.session_state.human_eval_filter_criteria,
+                )
+                filtered_trace_ids = structural_ids & _gemini_match_ids(
+                    st.session_state.human_eval_filter_cache, gem_key_active
+                )
+            else:
+                filtered_trace_ids = structural_ids
+
+            st.session_state.human_eval_filtered_trace_ids = filtered_trace_ids
+
+            total_eligible = sum(1 for fr in filter_index if fr["has_prompt_answer"])
+            st.markdown(
+                f"**{len(filtered_trace_ids):,} of {total_eligible:,}** eligible traces match the active filters."
+            )
+
+            if filtered_trace_ids:
+                preview_rows: list[dict[str, Any]] = []
+                for fr in filter_index:
+                    if fr["trace_id"] not in filtered_trace_ids:
+                        continue
+                    preview_rows.append(
+                        {
+                            "outcome": fr["outcome"],
+                            "lang": fr["lang"],
+                            "environment": fr["environment"] or "—",
+                            "aoi_type": fr["aoi_type_label"],
+                            "datasets": ", ".join(sorted(fr["datasets"])) if fr["datasets"] else "—",
+                            "prompt": fr["prompt_preview"],
+                        }
+                    )
+                    if len(preview_rows) >= 5:
+                        break
+                with st.expander("Preview matching traces (first 5)", expanded=False):
+                    st.dataframe(preview_rows, hide_index=True, width="stretch")
+
+        with step4_container:
+            st.subheader("4. Start Evaluating!")
+            evaluator_name = st.text_input(
+                "Reviewer full name (to create unique scores)",
+                value=st.session_state.human_eval_evaluator_name,
+                placeholder="e.g. Alice Smith",
+                key="_eval_name_input",
+                help="Used in CSV filename and appended to Langfuse score comments.",
+            )
+            if evaluator_name.strip():
+                st.session_state.human_eval_evaluator_name = _slugify_name(evaluator_name)
+
+            name_ok = bool(str(st.session_state.get("human_eval_evaluator_name") or "").strip())
+            if not name_ok:
+                st.info("Enter a reviewer name to enable evaluation and sampling actions.")
+
+            cfg_ok = bool(str(st.session_state.get("human_eval_score_config_id") or "").strip())
+            queue_ok = bool(str(st.session_state.get("human_eval_queue_id") or "").strip())
+            ready = bool(has_langfuse and cfg_ok and queue_ok)
+
+            pending_count = 0
+            if ready:
+                try:
+                    pending_items = list_annotation_queue_items(
+                        base_url=base_url,
+                        headers=headers,
+                        queue_id=str(st.session_state.human_eval_queue_id),
+                        status="PENDING",
+                        page=1,
+                        limit=100,
+                    )
+                    pending_count = len(pending_items)
+                except Exception:
+                    pending_items = []
+            else:
+                pending_items = []
+
+            action_c1, action_c2 = st.columns(2)
+            with action_c1:
+                if st.button(
+                    f"▶️ Evaluate pending items ({pending_count})",
+                    type="primary",
+                    disabled=not bool(name_ok and ready and pending_count > 0),
+                    help="Loads pending queue items from Langfuse and starts the evaluation session.",
+                ):
+                    queue_id = str(st.session_state.human_eval_queue_id)
+                    st.session_state.human_eval_active_queue_id = queue_id
+                    st.session_state.human_eval_active_score_config_id = str(st.session_state.human_eval_score_config_id)
+                    st.session_state.human_eval_active_score_config_name = str(st.session_state.human_eval_score_config_name)
+                    st.session_state.human_eval_active_score_config_description = str(
+                        st.session_state.human_eval_score_config_description
+                    )
+                    st.session_state.human_eval_active_queue_description = str(
+                        st.session_state.human_eval_queue_description
+                    )
+
+                    trace_ids = [
+                        str(it.get("objectId") or "").strip()
+                        for it in pending_items
+                        if isinstance(it, dict) and str(it.get("objectType") or "").upper() == "TRACE"
+                    ]
+                    item_map = {
+                        str(it.get("objectId") or "").strip(): str(it.get("id") or "").strip()
+                        for it in pending_items
+                        if isinstance(it, dict) and it.get("objectId") and it.get("id")
+                    }
+
+                    trace_by_id: dict[str, dict[str, Any]] = {}
+                    for t in traces:
+                        try:
+                            n = normalize_trace_format(t)
+                            tid = str(n.get("id") or "").strip()
+                            if tid:
+                                trace_by_id[tid] = n
+                        except Exception:
+                            continue
+
+                    loaded: list[dict[str, Any]] = []
+                    prog = st.progress(0.0, text="Preparing pending traces...")
+                    for i, tid in enumerate(trace_ids):
+                        n = trace_by_id.get(tid)
+                        if n is None:
+                            try:
+                                tr = fetch_trace(base_url=base_url, headers=headers, trace_id=tid)
+                                n = normalize_trace_format(tr)
+                            except Exception:
+                                n = None
+                        if n is not None:
+                            prompt = first_human_prompt(n)
+                            answer = final_ai_message(n)
+                            if prompt and answer:
+                                helper_info = extract_trace_context(n)
+                                chart_data = _extract_chart_data(n)
+                                loaded.append(
+                                    {
+                                        "trace_id": n.get("id"),
+                                        "timestamp": n.get("timestamp"),
+                                        "session_id": n.get("sessionId"),
+                                        "environment": n.get("environment"),
+                                        "prompt": prompt,
+                                        "answer": answer,
+                                        "aois": helper_info.get("aois", []),
+                                        "datasets": helper_info.get("datasets", []),
+                                        "datasets_analysed": helper_info.get("datasets_analysed", []),
+                                        "tools_used": helper_info.get("tools_used", []),
+                                        "pull_data_calls": helper_info.get("pull_data_calls", []),
+                                        "chart_insight_text": helper_info.get("chart_insight_text", ""),
+                                        "chart_data": chart_data,
+                                        "aoi_name": helper_info.get("aoi_name", ""),
+                                        "aoi_type": helper_info.get("aoi_type", ""),
+                                    }
+                                )
+                        prog.progress((i + 1) / max(1, len(trace_ids)))
+                    prog.empty()
+
+                    st.session_state.human_eval_samples = loaded
+                    st.session_state.human_eval_queue_items = item_map
+                    st.session_state.human_eval_index = 0
+                    st.session_state.human_eval_annotations = {}
+                    st.session_state.human_eval_started_at = time.time()
+                    st.session_state.human_eval_completed = False
+                    st.session_state.human_eval_streak = 0
+                    st.session_state.human_eval_showed_balloons = False
+                    st.rerun()
+
+            with action_c2:
+                st.caption("Or sample traces and add them to the eval queue.")
+
+            col_size, col_seed = st.columns(2)
+            with col_size:
+                sample_size = st.number_input("Sample size", min_value=1, max_value=200, value=10)
+            with col_seed:
+                random_seed = st.number_input("Random seed", min_value=0, max_value=10_000_000, value=0)
 
             if not ready:
                 st.warning("Complete steps 1-2 to enable sampling.")
@@ -870,37 +1120,42 @@ def render(
             ):
                 normed: list[dict[str, Any]] = []
 
-                criteria = str(st.session_state.get("human_eval_filter_criteria", "") or "")
-                model_name = str(st.session_state.get("human_eval_filter_model", "") or "")
-                filter_active = bool(criteria.strip())
-                criteria_key = _criteria_key(model_name, criteria) if filter_active else ""
-                cache = st.session_state.get("human_eval_filter_cache", {})
-
-                if filter_active:
-                    if not isinstance(cache, dict) or not any(
+                gemini_criteria = str(st.session_state.get("human_eval_filter_criteria", "") or "").strip()
+                if gemini_criteria:
+                    gem_cache = st.session_state.get("human_eval_filter_cache", {})
+                    gem_key = _criteria_key(
+                        str(st.session_state.get("human_eval_filter_model") or ""),
+                        gemini_criteria,
+                    )
+                    if not isinstance(gem_cache, dict) or not any(
                         isinstance(v, dict)
-                        and v.get("criteria_key") == criteria_key
+                        and v.get("criteria_key") == gem_key
                         and v.get("match") is True
-                        for v in cache.values()
+                        for v in gem_cache.values()
                     ):
                         st.warning(
-                            "Filter criteria is set, but there are no matching classified traces yet. "
+                            "Gemini filter criteria is set, but there are no matching classified traces yet. "
                             "Run the Gemini filter (or increase 'Max traces to classify') before sampling."
                         )
                         return
 
+                filtered_ids = st.session_state.human_eval_filtered_trace_ids
+                if not filtered_ids:
+                    st.warning(
+                        "No traces match the active filters. Adjust the filters in step 3 and try again."
+                    )
+                    return
+
                 for t in traces:
                     n = normalize_trace_format(t)
+                    tid = str(n.get("id") or "")
+                    if tid not in filtered_ids:
+                        continue
+
                     prompt = first_human_prompt(n)
                     answer = final_ai_message(n)
                     if not prompt or not answer:
                         continue
-
-                    if filter_active and criteria.strip():
-                        tid = str(n.get("id") or "")
-                        entry = cache.get(tid) if isinstance(cache, dict) and tid else None
-                        if not (isinstance(entry, dict) and entry.get("criteria_key") == criteria_key and entry.get("match") is True):
-                            continue
 
                     helper_info = extract_trace_context(n)
                     chart_data = _extract_chart_data(n)
@@ -921,7 +1176,6 @@ def render(
                             "chart_data": chart_data,
                             "aoi_name": helper_info.get("aoi_name", ""),
                             "aoi_type": helper_info.get("aoi_type", ""),
-                            "filter_match": True if filter_active and criteria.strip() else False,
                         }
                     )
 

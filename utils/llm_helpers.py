@@ -14,6 +14,7 @@ def get_gemini_model_options(api_key: str, cache_key: str = "gemini_model_option
         return list(cached)
 
     fallback = [
+        "gemini-3.1-flash-lite-preview",
         "gemini-2.5-flash-lite",
         "gemini-2.0-flash",
         "gemini-1.5-pro",
@@ -130,7 +131,12 @@ def call_gemini(api_key: str, model_name: str, prompt: str) -> str:
 
 # Models with large output token limits (65K+) can handle bigger batches.
 # Models with 8K output limits need smaller batches.
-_LARGE_OUTPUT_MODELS = {"gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"}
+_LARGE_OUTPUT_MODELS = {
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+}
 _DEFAULT_BATCH_SIZE_LARGE = 50  # for 65K output models
 _DEFAULT_BATCH_SIZE_SMALL = 25  # for 8K output models
 

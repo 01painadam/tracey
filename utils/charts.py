@@ -5,7 +5,7 @@ import pandas as pd
 from typing import Any, Mapping, Sequence
 
 
-_LANG_NAME_MAP: dict[str, str] = {
+LANG_NAME_MAP: dict[str, str] = {
     "af": "Afrikaans",
     "ar": "Arabic",
     "bg": "Bulgarian",
@@ -265,7 +265,7 @@ def language_bar_chart(df: pd.DataFrame, top_n: int = 15) -> alt.Chart | None:
         .astype(str)
         .str.strip()
         .str.lower()
-        .map(lambda c: _LANG_NAME_MAP.get(c, c or "Unknown"))
+        .map(lambda c: LANG_NAME_MAP.get(c, c or "Unknown"))
     )
     lang_df["percent"] = (lang_df["count"] / lang_df["count"].sum() * 100).round(1)
     return (
