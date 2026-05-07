@@ -191,6 +191,7 @@ def _background_langfuse_write(
     item_id: str | None,
     bug_report: dict[str, Any] | None = None,
     bug_score_config_id: str | None = None,
+    assignment: str = "",
 ) -> str | None:
     """Write rating score, update queue item, then optionally write a bug_report score.
 
@@ -209,6 +210,7 @@ def _background_langfuse_write(
             comment=formatted_comment,
             metadata={
                 "evaluator": evaluator,
+                "assignment": assignment,
                 "source": "Tracey",
                 "flagged_for_removal": bool(flagged_for_removal),
             },
@@ -270,6 +272,7 @@ def _background_langfuse_write(
                 comment=description or None,
                 metadata={
                     "evaluator": evaluator,
+                    "assignment": assignment,
                     "source": "Tracey",
                     "kind": "bug_report",
                     "rating_score_id": score_id,
@@ -326,6 +329,7 @@ def render(
         "human_eval_streak": 0,
         "human_eval_showed_balloons": False,
         "human_eval_evaluator_name": "",
+        "human_eval_assignment": "",
         "human_eval_current_trace_id": "",
         "human_eval_clear_notes_next_run": False,
         "_eval_notes": "",
@@ -1037,15 +1041,26 @@ def render(
 
         with step4_container:
             st.subheader("4. Start Evaluating!")
-            evaluator_name = st.text_input(
-                "Reviewer full name (to create unique scores)",
-                value=st.session_state.human_eval_evaluator_name,
-                placeholder="e.g. Alice Smith",
-                key="_eval_name_input",
-                help="Used in CSV filename and appended to Langfuse score comments.",
-            )
-            if evaluator_name.strip():
-                st.session_state.human_eval_evaluator_name = _slugify_name(evaluator_name)
+            name_col, asg_col = st.columns(2)
+            with name_col:
+                evaluator_name = st.text_input(
+                    "Reviewer full name (to create unique scores)",
+                    value=st.session_state.human_eval_evaluator_name,
+                    placeholder="e.g. Alice Smith",
+                    key="_eval_name_input",
+                    help="Used in CSV filename and appended to Langfuse score comments.",
+                )
+                if evaluator_name.strip():
+                    st.session_state.human_eval_evaluator_name = _slugify_name(evaluator_name)
+            with asg_col:
+                assignment_input = st.text_input(
+                    "Assignment (optional)",
+                    value=st.session_state.human_eval_assignment,
+                    placeholder="e.g. dataset-selection",
+                    key="_eval_assignment_input",
+                    help="Tag scores with what you were asked to focus on, so Insights can segment by assignment.",
+                )
+                st.session_state.human_eval_assignment = _slugify_name(assignment_input)
 
             name_ok = bool(str(st.session_state.get("human_eval_evaluator_name") or "").strip())
             if not name_ok:
@@ -1611,6 +1626,7 @@ def render(
                 st.session_state.get("human_eval_active_score_config_name") or ""
             ).strip()
             evaluator = str(st.session_state.get("human_eval_evaluator_name") or "").strip() or "anon"
+            assignment = str(st.session_state.get("human_eval_assignment") or "").strip()
             score_name = config_name or "human_eval"
 
             score_value = {"pass": "Pass", "fail": "Fail", "unsure": "Unsure"}.get(
@@ -1655,6 +1671,7 @@ def render(
                         item_id=item_id if isinstance(item_id, str) and item_id.strip() else None,
                         bug_report=bug_payload,
                         bug_score_config_id=bug_cfg_id or None,
+                        assignment=assignment,
                     )
                 except Exception as e:
                     langfuse_err = str(e)

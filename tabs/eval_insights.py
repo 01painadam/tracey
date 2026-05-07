@@ -120,7 +120,37 @@ def render(
         return
 
     # Build DataFrame from scores
-    df = _build_scores_dataframe(scores)
+    df_full = _build_scores_dataframe(scores)
+
+    # Assignment filter: segments downstream sections to a specific assignment (or "(unassigned)").
+    # Empty selection = overall view (no filter).
+    UNASSIGNED_LABEL = "(unassigned)"
+    if "assignment" in df_full.columns:
+        assignment_series = df_full["assignment"].fillna("").astype(str).str.strip()
+        non_empty = sorted(set(assignment_series) - {""})
+        has_unassigned = (assignment_series == "").any()
+        assignment_options = list(non_empty) + ([UNASSIGNED_LABEL] if has_unassigned else [])
+    else:
+        assignment_options = []
+
+    selected_assignments = st.multiselect(
+        "Segment by assignment",
+        options=assignment_options,
+        default=[],
+        key="eval_insights_assignment_filter",
+        help="Leave empty for overall insights, or pick one or more assignment codes to scope every section below.",
+    )
+
+    if selected_assignments and "assignment" in df_full.columns:
+        explicit = {a for a in selected_assignments if a != UNASSIGNED_LABEL}
+        include_unassigned = UNASSIGNED_LABEL in selected_assignments
+        mask = df_full["assignment"].fillna("").astype(str).isin(explicit)
+        if include_unassigned:
+            mask = mask | (df_full["assignment"].fillna("").astype(str).str.strip() == "")
+        df = df_full[mask].reset_index(drop=True)
+    else:
+        df = df_full
+
     if "is_bug" in df.columns:
         df_ratings = df[~df["is_bug"].fillna(False)].reset_index(drop=True)
         df_bugs = df[df["is_bug"].fillna(False)].reset_index(drop=True)
@@ -128,9 +158,14 @@ def render(
         df_ratings = df
         df_bugs = df.iloc[0:0]
 
+    if selected_assignments:
+        st.caption(
+            f"Showing **{len(df):,}** of {len(df_full):,} scores — filtered to: {', '.join(selected_assignments)}."
+        )
+
     # Display scores table in closed expander
     with st.expander(f"📊 Raw Scores Data ({len(df)} scores)", expanded=False):
-        display_cols = ["trace_id", "score_config", "value", "comment", "source", "evaluator", "timestamp"]
+        display_cols = ["trace_id", "score_config", "value", "comment", "source", "evaluator", "assignment", "timestamp"]
         available_cols = [c for c in display_cols if c in df.columns]
         df_display = df[available_cols].copy() if available_cols else df.copy()
 
@@ -242,6 +277,7 @@ def _build_scores_dataframe(scores: list[dict[str, Any]]) -> pd.DataFrame:
             "trace_id": s.get("traceId"),
             "queue_id": meta.get("queue_id", None),
             "evaluator": meta.get("evaluator", ""),
+            "assignment": str(meta.get("assignment") or ""),
             "source": meta.get("source", None),
             "flagged_for_removal": bool(meta.get("flagged_for_removal", False)),
             "score_config": name,
