@@ -1056,7 +1056,7 @@ def render(
                 assignment_input = st.text_input(
                     "Assignment (optional)",
                     value=st.session_state.human_eval_assignment,
-                    placeholder="e.g. dataset-selection",
+                    placeholder="e.g. dataset name assigned to",
                     key="_eval_assignment_input",
                     help="Tag scores with what you were asked to focus on, so Insights can segment by assignment.",
                 )
