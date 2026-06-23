@@ -26,6 +26,9 @@ from utils.trace_parsing import (
 )
 from utils.data_helpers import as_float
 
+# Default Zeno API host (staging). Overridable via env/sidebar.
+DEFAULT_ZENO_API_URL = "https://api.staging.globalnaturewatch.org"
+
 
 def configure_page(title: str = "Tracey", layout: str = "wide") -> None:
     """Configure Streamlit page settings."""
@@ -111,6 +114,8 @@ def get_app_config() -> dict[str, Any]:
         "public_key": st.session_state.get("langfuse_public_key", ""),
         "secret_key": st.session_state.get("langfuse_secret_key", ""),
         "base_url": st.session_state.get("langfuse_base_url", ""),
+        "zeno_api_url": st.session_state.get("zeno_api_url", ""),
+        "zeno_api_token": st.session_state.get("zeno_api_token", ""),
         "gemini_api_key": st.session_state.get("gemini_api_key", ""),
         "base_thread_url": st.session_state.get("base_thread_url", ""),
         "environment": st.session_state.get("environment", "production"),
@@ -409,6 +414,22 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
                 value=os.getenv("LANGFUSE_BASE_URL", ""),
                 key="langfuse_base_url_input",
             )
+            st.caption(
+                "Analytics, Trace Explorer and Conversation Browser read from the "
+                "Zeno API (server-side aggregations). The token is a **superuser** "
+                "Resource Watch bearer token."
+            )
+            zeno_api_url = st.text_input(
+                "ZENO_API_URL",
+                value=os.getenv("ZENO_API_URL", DEFAULT_ZENO_API_URL),
+                key="zeno_api_url_input",
+            )
+            zeno_api_token = st.text_input(
+                "ZENO_API_TOKEN (_superuser bearer_)",
+                value=st.session_state.get("zeno_api_token") or os.getenv("ZENO_API_TOKEN", ""),
+                type="password",
+                key="zeno_api_token_input",
+            )
             gemini_override = st.text_input(
                 "BYO GEMINI_API_KEY (_optional_)",
                 value="",
@@ -480,6 +501,8 @@ section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] button:hove
         st.session_state.langfuse_public_key = public_key
         st.session_state.langfuse_secret_key = secret_key
         st.session_state.langfuse_base_url = base_url
+        st.session_state.zeno_api_url = zeno_api_url
+        st.session_state.zeno_api_token = zeno_api_token
         st.session_state.gemini_api_key = gemini_api_key
         st.session_state.base_thread_url = base_thread_url
         st.session_state.envs = envs

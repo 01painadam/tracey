@@ -1,27 +1,15 @@
 """Trace Analytics Reports tab."""
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 
+from utils import zeno_api
+from utils.shared_ui import _is_machine_user_id, _load_internal_user_ids
+
 from utils import (
-    normalize_trace_format,
-    parse_trace_dt,
-    first_human_prompt,
-    final_ai_message,
-    classify_outcome,
-    active_turn_prompt,
-    active_turn_answer,
-    extract_trace_context,
-    extract_tool_calls_and_results,
-    extract_tool_flow,
-    extract_usage_metadata,
-    trace_has_internal_error,
-    as_float,
     csv_bytes_any,
     format_report_date,
     normalize_prompt,
@@ -35,10 +23,7 @@ from utils import (
     latency_histogram,
     cost_histogram,
     category_pie_chart,
-    tool_success_rate_chart,
     tool_calls_vs_latency_chart,
-    tool_flow_sankey_data,
-    reasoning_tokens_histogram,
     prompt_utilisation_histogram,
     prompt_utilisation_daily_chart,
     user_segment_bar_chart,
@@ -66,8 +51,10 @@ def render(
     end_date,
     envs: list[str],
     stats_max_traces: int,
+    zeno_api_url: str = "",
+    zeno_api_token: str = "",
 ) -> None:
-    """Render the Trace Analytics Reports tab."""
+    """Render the Trace Analytics Reports tab (reads from the Zeno API)."""
 
     start_date_label = format_report_date(start_date)
     end_date_label = format_report_date(end_date)
@@ -89,71 +76,79 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
         unsafe_allow_html=True,
     )
 
-    if "stats_traces" not in st.session_state:
-        st.session_state.stats_traces = []
-
     if "analytics_user_first_seen" not in st.session_state:
         st.session_state.analytics_user_first_seen = None
     if "analytics_user_first_seen_debug" not in st.session_state:
         st.session_state.analytics_user_first_seen_debug = {}
 
-    traces: list[dict[str, Any]] = st.session_state.stats_traces
-    if not traces:
+    zeno_url = (zeno_api_url or "").strip()
+    zeno_token = (zeno_api_token or "").strip()
+
+    st.caption(
+        f"Reading from the **Zeno API** (server-side, per-turn aggregation) · "
+        f"environment: **{', '.join(envs) if envs else 'all'}** · "
+        f"{format_report_date(start_date)} → {format_report_date(end_date)}"
+    )
+    c_fetch, _c_sp = st.columns([1, 3])
+    with c_fetch:
+        fetch_clicked = st.button(
+            "🚀 Fetch from Zeno API", type="primary", key="analytics_zeno_fetch"
+        )
+
+    if fetch_clicked:
+        if not zeno_url or not zeno_token:
+            st.error("Set ZENO_API_URL and ZENO_API_TOKEN in the sidebar (🔐 Credentials).")
+        else:
+            try:
+                with st.spinner("Fetching traces from the Zeno API…"):
+                    rows_fetched = zeno_api.fetch_traces_window(
+                        base_url=zeno_url,
+                        token=zeno_token,
+                        start_date=start_date,
+                        end_date=end_date,
+                        environment=(envs[0] if envs and len(envs) == 1 else None),
+                        max_traces=int(stats_max_traces),
+                    )
+                st.session_state.zeno_analytics_rows = rows_fetched
+                st.toast(f"Fetched {len(rows_fetched):,} traces from the Zeno API")
+            except zeno_api.ZenoAPIError as e:
+                st.error(str(e))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Zeno API fetch failed: {e}")
+
+    rows = list(st.session_state.get("zeno_analytics_rows") or [])
+    if not rows:
         st.info(
-            "This tab gives you a high-level view of the currently loaded trace dataset: volumes, outcomes, latency, cost, "
-            "and usage patterns.\n\n"
-            "1. Use the sidebar **🚀 Fetch traces** button to load a dataset once.\n"
-            "2. Switch between tabs to explore different views of the **same** traces without re-fetching."
+            "This tab reads aggregate analytics from the Zeno API.\n\n"
+            "Set the date range / environment in the sidebar, then click "
+            "**🚀 Fetch from Zeno API** above. (Per-turn token/tool/dataset numbers "
+            "are computed server-side and are lower — and correct — vs. the old "
+            "cumulative numbers.)"
         )
         return
 
-    raw_traces = st.session_state.get("stats_traces_raw", [])
-    n_raw = len(raw_traces)
-    n_filtered = len(traces)
-    n_excluded = n_raw - n_filtered
+    # Client-side exclusion of machine + internal users (parity with the
+    # Langfuse path); cheap on the small derived rows.
+    internal_user_ids = _load_internal_user_ids()
     exclude_internal = bool(st.session_state.get("_shadow_exclude_internal", True))
-    if exclude_internal and n_excluded > 0:
+
+    def _keep_row(r: dict[str, Any]) -> bool:
+        uid = str(r.get("user_id") or "").strip()
+        if _is_machine_user_id(uid):
+            return False
+        if exclude_internal and internal_user_ids and uid in internal_user_ids:
+            return False
+        return True
+
+    n_raw = len(rows)
+    rows = [r for r in rows if _keep_row(r)]
+    if envs:
+        rows = [r for r in rows if (r.get("environment") in envs)]
+    n_excluded = n_raw - len(rows)
+    if n_excluded > 0:
         st.info(
-            f"**{n_raw:,}** raw traces loaded · **{n_excluded:,}** internal-user traces excluded · "
-            f"**{n_filtered:,}** traces used for analytics (_{n_filtered/n_raw:,.1%} of raw traces_)"
-        )
-
-    normed = [normalize_trace_format(t) for t in traces]
-
-    rows: list[dict[str, Any]] = []
-    for n in normed:
-        prompt = active_turn_prompt(n) or first_human_prompt(n)
-        answer = active_turn_answer(n) or final_ai_message(n)
-        dt = parse_trace_dt(n)
-        outcome = classify_outcome(n, answer or "")
-
-        ctx = extract_trace_context(n)
-        usage = extract_usage_metadata(n)
-        has_internal_err = trace_has_internal_error(n)
-
-        rows.append(
-            {
-                "trace_id": n.get("id"),
-                "timestamp": dt,
-                "date": dt.date() if dt else None,
-                "environment": n.get("environment"),
-                "session_id": n.get("sessionId"),
-                "user_id": n.get("userId") or (n.get("metadata") or {}).get("user_id") or (n.get("metadata") or {}).get("userId"),
-                "latency_seconds": as_float(n.get("latency")),
-                "total_cost": as_float(n.get("totalCost")),
-                "outcome": outcome,
-                "prompt": prompt,
-                "answer": answer,
-                "aoi_name": ctx.get("aoi_name", ""),
-                "aoi_type": ctx.get("aoi_type", ""),
-                "datasets_analysed": ", ".join(ctx.get("datasets_analysed", [])),
-                "tool_call_count": usage.get("tool_call_count", 0),
-                "total_input_tokens": usage.get("total_input_tokens", 0),
-                "total_output_tokens": usage.get("total_output_tokens", 0),
-                "total_reasoning_tokens": usage.get("total_reasoning_tokens", 0),
-                "reasoning_ratio": usage.get("reasoning_ratio", 0.0),
-                "has_internal_error": has_internal_err,
-            }
+            f"**{n_raw:,}** traces fetched · **{n_excluded:,}** internal/machine "
+            f"traces excluded · **{len(rows):,}** used for analytics"
         )
 
     df = pd.DataFrame(rows)
@@ -219,8 +214,6 @@ div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem; 
     user_first_seen_total_users = int(len(user_first_seen_df)) if user_first_seen_df is not None else 0
     user_first_seen_new_users = len(segments.new_users)
     user_first_seen_returning_users = len(segments.returning_users)
-    user_first_seen_unknown_users = len(segments.unknown_users)
-    user_first_seen_filled_from_window = segments.filled_from_window
     engaged_users_total = len(segments.engaged_users)
     not_engaged_users_total = len(segments.not_engaged_users)
 
@@ -878,99 +871,28 @@ The **daily chart** counts each user **once per active day**, so a user active o
             st.altair_chart(aoi_name_bar(aoi_name_df, aoi_type_domain), width="stretch")
 
     # =====================================================================
-    # Section 7 — Agentic Flow Analysis
+    # Section 7 — Tool usage (per-turn, from the Zeno API)
     # =====================================================================
-    st.markdown("### Agentic Flow Analysis")
-    with st.expander("ℹ️ Agentic flow explained", expanded=False):
-        st.markdown(
-            "The agent orchestrates multiple **tool calls** per trace (e.g., data retrieval, analysis, charting). "
-            "This section shows how tools are chained, their success rates, reasoning-token overhead, and "
-            "whether clarification loops (e.g., ambiguous AOI) are triggered.\n\n"
-            "- **Tool flow** = the sequence START → tool₁ → tool₂ → … → END\n"
-            "- **Clarification loop** = the agent asked the user to disambiguate before proceeding\n"
-            "- **Reasoning ratio** = share of output tokens spent on chain-of-thought reasoning"
-        )
+    st.markdown("### Tool usage")
+    st.caption(
+        "Per-turn tool metrics from the Zeno API. Deep agentic-flow analysis "
+        "(tool-call sankey, per-tool success, clarification loops) needs the full "
+        "conversation tree and remains in the Langfuse-backed Product Intelligence "
+        "view; reasoning-token charts are omitted (Gemini reports no reasoning tokens)."
+    )
+    if "tool_call_count" in df.columns:
+        tc = pd.to_numeric(df["tool_call_count"], errors="coerce").dropna()
+        if len(tc):
+            tc1, tc2, tc3 = st.columns(3)
+            with tc1:
+                st.metric("Avg tool calls / trace", f"{tc.mean():.2f}")
+            with tc2:
+                st.metric("Max tool calls", f"{int(tc.max()):,}")
+            with tc3:
+                if "has_internal_error" in df.columns and len(df):
+                    st.metric("Tool error rate", f"{float(df['has_internal_error'].mean()):.1%}")
 
-    all_tool_calls: list[dict[str, Any]] = []
-    traces_with_ambiguity = 0
-    for n in normed:
-        calls = extract_tool_calls_and_results(n)
-        all_tool_calls.extend(calls)
-        if any(c["has_ambiguity"] for c in calls):
-            traces_with_ambiguity += 1
-
-    # Tool flow visualization
-    st.markdown("#### Tool call flow", help="Visualize how tool calls flow from START through tools to END. Line thickness = count, color = outcome status.")
-    flow_df = tool_flow_sankey_data(normed, extract_tool_flow)
-    if len(flow_df):
-        total_flows = int(flow_df["count"].sum())
-        status_counts = (
-            flow_df.groupby("status")["count"].sum().reset_index().rename(columns={"count": "transitions"})
-        )
-        status_counts["percent"] = status_counts["transitions"] / max(1, total_flows) * 100
-        total_traces_with_tools = sum(1 for n in normed if extract_tool_calls_and_results(n))
-
-        clarity_df = pd.DataFrame([
-            {"label": "Clarification needed", "count": int(traces_with_ambiguity)},
-            {"label": "No clarification", "count": int(total_traces_with_tools - traces_with_ambiguity)},
-        ])
-
-        pie_left, pie_right = st.columns(2)
-        with pie_left:
-            st.markdown("##### Tool call flow (status)", help="Breakdown of transition outcomes across all tool transitions.")
-            st.altair_chart(simple_pie_chart(status_counts, label_col="status", count_col="transitions"), width="stretch")
-        with pie_right:
-            st.markdown("##### Clarification loop rate", help="Share of traces that triggered a clarification request.")
-            if total_traces_with_tools > 0:
-                st.altair_chart(simple_pie_chart(clarity_df), width="stretch")
-            else:
-                st.info("No tool calls found to calculate clarification rate.")
-
-        flow_summary = (
-            flow_df.groupby(["source", "target", "status"])["count"]
-            .sum().reset_index().sort_values("count", ascending=False).head(20)
-        )
-        with st.expander("Top 20 tool transitions", expanded=False):
-            st.dataframe(flow_summary, hide_index=True, width="stretch")
-    else:
-        st.info("No tool calls found in traces.")
-
-    # Tool success rate by tool name
-    if all_tool_calls:
-        st.markdown("#### Tool success rate by tool", help="Stacked bar showing outcomes (success, ambiguity, semantic error, error) for each tool.")
-        tool_calls_df = pd.DataFrame(all_tool_calls)
-        tool_stats = (
-            tool_calls_df.groupby("tool_name")
-            .agg(
-                total=("tool_name", "count"),
-                success=("status", lambda x: int((x == "success").sum()) - int(tool_calls_df.loc[x.index, "has_ambiguity"].sum()) - int(tool_calls_df.loc[x.index, "is_semantic_error"].sum())),
-                ambiguity=("has_ambiguity", "sum"),
-                semantic_error=("is_semantic_error", "sum"),
-                error=("status", lambda x: int((x == "error").sum())),
-            )
-            .reset_index()
-        )
-        tool_stats["success"] = tool_stats["success"].clip(lower=0)
-        tool_stats = tool_stats.sort_values("total", ascending=False)
-        chart = tool_success_rate_chart(tool_stats)
-        if chart:
-            st.altair_chart(chart, width="stretch")
-
-    # Reasoning tokens histogram
-    if "reasoning_ratio" in df.columns:
-        reasoning_ratios = df["reasoning_ratio"].dropna()
-        reasoning_ratios = reasoning_ratios[reasoning_ratios > 0]
-        if len(reasoning_ratios):
-            st.markdown("#### Reasoning tokens distribution", help="How much of output tokens are spent on 'reasoning' (chain-of-thought). High ratios may indicate overthinking or complex queries.")
-            rc1, rc2, rc3, rc4 = st.columns(4)
-            with rc1:
-                st.metric("Traces with reasoning", f"{len(reasoning_ratios):,}")
-            with rc2:
-                st.metric("Mean ratio", f"{reasoning_ratios.mean():.1%}")
-            with rc3:
-                st.metric("Median ratio", f"{reasoning_ratios.median():.1%}")
-            with rc4:
-                st.metric("P90 ratio", f"{reasoning_ratios.quantile(0.9):.1%}")
-            chart = reasoning_tokens_histogram(reasoning_ratios)
-            if chart:
-                st.altair_chart(chart, width="stretch")
+        flow_chart = tool_calls_vs_latency_chart(df)
+        if flow_chart is not None:
+            st.markdown("#### Tool calls vs latency", help="Per-trace tool-call count against latency, coloured by outcome.")
+            st.altair_chart(flow_chart, width="stretch")
