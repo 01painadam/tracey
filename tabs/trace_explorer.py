@@ -3,6 +3,20 @@ from typing import Any
 
 import streamlit as st
 
+from utils import zeno_api
+from utils.data_helpers import format_report_date
+
+
+def _zeno_to_trace(detail: dict[str, Any]) -> dict[str, Any]:
+    """Adapt a Zeno trace-detail payload to the Langfuse-style keys the
+    renderers below expect (``sessionId``/``latency``/``totalCost``), while
+    keeping ``input``/``output`` (the native AgentState) intact."""
+    trace = dict(detail or {})
+    trace["sessionId"] = detail.get("session_id")
+    trace["latency"] = detail.get("latency_seconds")
+    trace["totalCost"] = detail.get("total_cost")
+    return trace
+
 
 def _as_dict(x: Any) -> dict[str, Any]:
     return x if isinstance(x, dict) else {}
@@ -202,33 +216,62 @@ def _trace_label(t: dict[str, Any]) -> str:
     return "(empty prompt)"
 
 
-def render(base_thread_url: str) -> None:
+def _list_label(item: dict[str, Any]) -> str:
+    """Selectbox label for a Zeno list item (prompt + timestamp)."""
+    prompt = " ".join(str(item.get("prompt") or "").split())
+    snippet = (prompt[:80] + "…") if len(prompt) > 80 else (prompt or "(empty prompt)")
+    ts = str(item.get("trace_timestamp") or "")[:19]
+    return f"{ts} · {snippet}" if ts else snippet
+
+
+def _list_item_from_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """Minimal list-item shape (for the picker) built from a detail payload."""
+    return {
+        "id": detail.get("id"),
+        "prompt": detail.get("prompt"),
+        "trace_timestamp": detail.get("trace_timestamp"),
+        "session_id": detail.get("session_id"),
+    }
+
+
+def render(
+    base_thread_url: str,
+    start_date=None,
+    end_date=None,
+    envs: list[str] | None = None,
+    zeno_api_url: str = "",
+    zeno_api_token: str = "",
+) -> None:
     st.subheader("🔎 Trace Explorer")
     st.caption(
         "Inspect individual traces in detail: view the current user turn, assistant output, tool calls, metadata, and raw JSON. "
-        "Useful for debugging odd outputs, latency/cost spikes, and tool failures."
+        "Useful for debugging odd outputs, latency/cost spikes, and tool failures. "
+        "Traces are listed and fetched on demand from the Zeno API (full conversation comes live from Langfuse)."
     )
 
-    traces: list[dict[str, Any]] = st.session_state.get("stats_traces", [])
-    if not traces:
-        st.info("Use the sidebar **🚀 Fetch traces** button first.")
-        return
+    zeno_url = (zeno_api_url or "").strip()
+    zeno_token = (zeno_api_token or "").strip()
 
-    with st.expander("🔽 Apply Filters", expanded=False):
+    st.caption(
+        f"Reading from the **Zeno API** · environment: **{', '.join(envs) if envs else 'all'}** · "
+        f"{format_report_date(start_date)} → {format_report_date(end_date)}"
+    )
+
+    with st.expander("🔽 Filters & fetch", expanded=True):
         f1, f2, f3 = st.columns(3)
         with f1:
             session_id_filter = st.text_input(
                 "Session id",
                 value=str(st.session_state.get("trace_explorer_filter_session_id") or ""),
                 key="trace_explorer_filter_session_id",
-                placeholder="e.g. 7f6b…",
+                placeholder="exact session id",
             )
         with f2:
             trace_id_filter = st.text_input(
                 "Trace id",
                 value=str(st.session_state.get("trace_explorer_filter_trace_id") or ""),
                 key="trace_explorer_filter_trace_id",
-                placeholder="e.g. 3a2c…",
+                placeholder="exact trace id (fetches directly)",
             )
         with f3:
             prompt_substring_filter = st.text_input(
@@ -237,49 +280,59 @@ def render(base_thread_url: str) -> None:
                 key="trace_explorer_filter_prompt_substring",
                 placeholder="substring…",
             )
+        fetch_clicked = st.button(
+            "🚀 Fetch matching traces", type="primary", key="explorer_zeno_fetch"
+        )
 
-        session_id_filter_n = str(session_id_filter or "").strip().lower()
-        trace_id_filter_n = str(trace_id_filter or "").strip().lower()
-        prompt_substring_filter_n = str(prompt_substring_filter or "").strip().lower()
+    if fetch_clicked:
+        if not zeno_url or not zeno_token:
+            st.error("Set ZENO_API_URL and ZENO_API_TOKEN in the sidebar (🔐 Credentials).")
+        else:
+            tid_q = str(trace_id_filter or "").strip()
+            try:
+                with st.spinner("Fetching from the Zeno API…"):
+                    if tid_q:
+                        # Exact trace id -> fetch the single detail directly.
+                        detail = zeno_api.fetch_trace(
+                            base_url=zeno_url, token=zeno_token, trace_id=tid_q
+                        )
+                        st.session_state.zeno_explorer_list = [_list_item_from_detail(detail)]
+                        st.session_state.zeno_explorer_detail_cache = {detail.get("id"): detail}
+                    else:
+                        items = zeno_api.fetch_traces_window(
+                            base_url=zeno_url,
+                            token=zeno_token,
+                            start_date=start_date,
+                            end_date=end_date,
+                            environment=(envs[0] if envs and len(envs) == 1 else None),
+                            session_id=(str(session_id_filter).strip() or None),
+                            prompt_contains=(str(prompt_substring_filter).strip() or None),
+                            max_traces=2000,
+                            raw=True,
+                        )
+                        st.session_state.zeno_explorer_list = items
+                        st.session_state.zeno_explorer_detail_cache = {}
+                st.toast(f"Fetched {len(st.session_state.zeno_explorer_list):,} matching traces")
+            except zeno_api.ZenoAPIError as e:
+                st.error(str(e))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Zeno API fetch failed: {e}")
 
-        filtered_idxs: list[int] = []
-        for i, t in enumerate(traces):
-            tid = str(t.get("id") or "").strip().lower()
-            sid = str(t.get("sessionId") or "").strip().lower()
-            prompt = str(_current_user_prompt(t) or "").strip().lower()
-
-            if session_id_filter_n and session_id_filter_n not in sid:
-                continue
-            if trace_id_filter_n and trace_id_filter_n not in tid:
-                continue
-            if prompt_substring_filter_n and prompt_substring_filter_n not in prompt:
-                continue
-
-            filtered_idxs.append(i)
-
-    if not filtered_idxs:
-        st.warning("No traces match the current filters.")
+    items: list[dict[str, Any]] = list(st.session_state.get("zeno_explorer_list") or [])
+    if not items:
+        st.info(
+            "Set the date range / filters above, then click **🚀 Fetch matching traces**. "
+            "Provide an exact **Trace id** to open a single trace directly."
+        )
         return
 
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        prev_selected = st.session_state.get("trace_explorer_selected_idx")
-        try:
-            prev_selected_int = int(prev_selected) if prev_selected is not None else None
-        except Exception:
-            prev_selected_int = None
-
-        default_pos = 0
-        if isinstance(prev_selected_int, int) and prev_selected_int in filtered_idxs:
-            default_pos = filtered_idxs.index(prev_selected_int)
-
-        filtered_traces_str = f"(Showing {len(filtered_idxs):,} / {len(traces):,} traces)" if len(filtered_idxs) < len(traces) else ""
         idx = st.selectbox(
-            f"Select trace {filtered_traces_str}",
-            options=filtered_idxs,
-            format_func=lambda i: _trace_label(traces[int(i)]),
-            index=default_pos,
+            f"Select trace ({len(items):,} matching)",
+            options=list(range(len(items))),
+            format_func=lambda i: _list_label(items[int(i)]),
             key="trace_explorer_selected_idx",
         )
 
@@ -287,7 +340,31 @@ def render(base_thread_url: str) -> None:
         hide_empty = st.checkbox("Hide empty messages", value=True, key="trace_explorer_hide_empty")
         show_raw = st.checkbox("Show raw JSON", value=False, key="trace_explorer_show_raw")
 
-    trace = traces[int(idx)]
+    selected = items[int(idx)]
+    selected_id = str(selected.get("id") or "")
+
+    cache: dict[str, Any] = st.session_state.setdefault("zeno_explorer_detail_cache", {})
+    detail = cache.get(selected_id)
+    if detail is None:
+        try:
+            with st.spinner("Fetching trace detail…"):
+                detail = zeno_api.fetch_trace(
+                    base_url=zeno_url, token=zeno_token, trace_id=selected_id
+                )
+            cache[selected_id] = detail
+        except zeno_api.ZenoAPIError as e:
+            st.error(str(e))
+            return
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Failed to fetch trace detail: {e}")
+            return
+
+    if not detail.get("raw_available", False):
+        st.warning(
+            "Raw trace unavailable from Langfuse (purged or unreachable) — showing derived fields only."
+        )
+
+    trace = _zeno_to_trace(detail)
     trace_clean = _strip_noise(trace)
 
     tid = str(trace.get("id") or "")

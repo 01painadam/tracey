@@ -21,7 +21,8 @@ st.title("💬🧠📎 Tracey. `v0.1`")
 st.markdown(
     """
 **Tracey** is a trace analysis and human evaluation tool for Global Nature Watch.
-Quickly pull and explore traces from Langfuse. _Ta, Trace!_
+Analytics, Trace Explorer & the Conversation Browser read server-side aggregations from the
+**Zeno API**; Human Eval & Product Intelligence pull full traces from **Langfuse**. _Ta, Trace!_
 
 ### 🛠️ What's in the toolkit?
 

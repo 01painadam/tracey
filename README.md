@@ -2,11 +2,16 @@
 Think: _Clippy_... but for GNW traces. A suite of tools intended to make GNW traces accessible, regardless of technical capability. 
 
 **ℹ️ What this tool does**
-Tracey allows you quickly pull and explore traces from Langfuse.
-- **📥 Fetch** a single set of traces once
-- **📊 Explore** the same dataset across tabs
-- **📋 Generate** reports & understand user behaviour
-- **🧪 Sample** for human eval & product mining
+Tracey makes GNW agent traces accessible, regardless of technical capability.
+- **📊 Explore** Analytics, Trace Explorer, and the Conversation Browser — these read
+  **server-side, per-turn aggregations from the Zeno API** (project-zeno).
+- **🧪 Sample** for **Human Eval** and **Product Intelligence** — these still pull full
+  traces directly from **Langfuse** (fetched once from the sidebar, reused across those tabs).
+- **📋 Generate** reports & understand user behaviour.
+
+> Langfuse remains the source of truth for raw traces. The Zeno API just serves the derived
+> aggregations (and fetches an individual full trace on demand when you open one in the
+> Trace Explorer).
 
 ## Run locally
 
@@ -20,9 +25,17 @@ Tracey allows you quickly pull and explore traces from Langfuse.
 Create a `.env` file in the repo root:
 
 ```bash
+# Langfuse — source of truth for raw traces; powers Human Eval & Product Intelligence.
 LANGFUSE_PUBLIC_KEY="..."
 LANGFUSE_SECRET_KEY="..."
 LANGFUSE_BASE_URL="..."
+
+# Zeno API — powers the read-path tabs (Analytics, Trace Explorer, Conversation Browser)
+# via server-side, per-turn aggregation. The token is a SUPERUSER Resource Watch bearer
+# token with read access to the traces APIs.
+# NOTE: api.staging.… resolves; staging.api.… does NOT — don't swap them.
+ZENO_API_URL="https://api.staging.globalnaturewatch.org"
+ZENO_API_TOKEN="..."
 
 # Optional (only needed for Gemini-powered features)
 GEMINI_API_KEY="..."  # or GOOGLE_API_KEY
@@ -55,7 +68,12 @@ Then open the URL Streamlit prints (usually `http://localhost:8501`).
 
 ## Notes
 
-- The app fetches traces **once** from the sidebar, then reuses the same dataset across tabs.
+- **Analytics**, **Trace Explorer**, and **Conversation Browser** fetch on demand from the
+  **Zeno API** (their own "🚀 Fetch…" buttons), using the date range / filters in the sidebar.
+  Per-turn token/tool/dataset numbers here are computed server-side and are **lower and more
+  correct** than the old in-memory aggregation (which summed whole conversations).
+- **Human Eval** and **Product Intelligence** fetch the full trace set **once** from the
+  sidebar (Langfuse) and reuse it across those tabs.
 - Human eval exports are always available via the **Download CSV** button.
 
 ## Product Development Mining

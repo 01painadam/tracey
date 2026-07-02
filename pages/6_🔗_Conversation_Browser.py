@@ -15,4 +15,9 @@ config = render_sidebar()
 
 render_session_urls(
     base_thread_url=config["base_thread_url"],
+    start_date=config["start_date"],
+    end_date=config["end_date"],
+    envs=config["envs"],
+    zeno_api_url=config["zeno_api_url"],
+    zeno_api_token=config["zeno_api_token"],
 )

@@ -22,4 +22,6 @@ render_analytics(
     end_date=config["end_date"],
     envs=config["envs"],
     stats_max_traces=config["stats_max_traces"],
+    zeno_api_url=config["zeno_api_url"],
+    zeno_api_token=config["zeno_api_token"],
 )
